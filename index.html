@@ -20,6 +20,7 @@
     .muted{color:var(--muted)}
     details{margin-top:14px}
     pre{white-space:pre-wrap;font-size:12px;background:#0f172a;border:1px solid var(--border);padding:10px;border-radius:8px;max-height:320px;overflow:auto}
+    .toolbar{display:flex;gap:8px;margin-top:10px}
   </style>
 </head>
 <body>
@@ -29,8 +30,9 @@
       <button id="parseFileBtn">Skapa lista från fil</button>
       <span id="status" class="muted"></span>
     </div>
-    <div class="muted" style="margin-top:8px">
-      Resultat: <b>Skola</b> · <b>Inriktning</b> · <b>Lägsta Merit</b>
+    <div class="toolbar">
+      <button id="exportCsvBtn" disabled>Exportera CSV</button>
+      <small class="muted">Resultat: <b>Skola</b> · <b>Inriktning</b> · <b>Lägsta Merit</b></small>
     </div>
   </header>
 
@@ -43,13 +45,13 @@
     </table>
 
     <details>
-      <summary>Visa debug (första ~80 byggda rader)</summary>
+      <summary>Visa debug (första ~120 byggda rader)</summary>
       <pre id="debugLines"></pre>
     </details>
   </main>
 
   <script type="module">
-    // Justera paths vid behov:
+    // Anpassa sökvägar om din struktur skiljer sig:
     import * as pdfjsLib from './vendor/pdfjs/pdf.mjs';
     const worker = new Worker('./vendor/pdfjs/pdf.worker.mjs', { type: 'module' });
     pdfjsLib.GlobalWorkerOptions.workerPort = worker;
@@ -58,16 +60,13 @@
     const outTable = document.getElementById('outTable');
     const tbody = outTable.querySelector('tbody');
     const debugEl = document.getElementById('debugLines');
+    const exportCsvBtn = document.getElementById('exportCsvBtn');
 
-    const MARKER_ANY = 'Slutlig antagningsstatistik';   // "för" kan brytas i PDF
-    const STUDIEVAG = 'Studieväg';
-    const LOWEST_HDR = 'Lägsta jämförelsetal';
-
+    const MARKER_ANY = 'Slutlig antagningsstatistik'; // “för” kan ligga på annan rad
     const NORM_RE = /\s+/g;
     const norm = s => (s||'').replace(NORM_RE,' ').trim();
-    const isMostlyNumbers = s => /^(\d|[.,]|\s)+$/.test(s.trim());
 
-    // Gruppér textbitar till rader via y/x
+    // Bygg rader av pdf.js text-items via y/x-gruppering
     function itemsToLines(items){
       const rows = new Map();
       const yQuant = 2;
@@ -87,163 +86,75 @@
       return lines;
     }
 
-    // Heuristik: skolnamn
+    // Heuristik: skolnamn (ta text före markören)
     function detectSchool(line){
-      // 1) Om raden innehåller markören, ta texten före
       if(line.includes(MARKER_ANY)){
         const before = line.split(MARKER_ANY)[0].trim();
         const cleaned = before.replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö \-\.]/g,'').trim();
         if(cleaned) return cleaned;
       }
-      // 2) Annars: ren skolrad (t.ex. "Alléskolan", "...gymnasiet")
-      if(/(skolan|skolan\.|gymnasiet|gymnasiet\.|gymnasium)$/i.test(line) || /^[A-ZÅÄÖ].{2,}$/.test(line) ){
-        // Begränsa till "rimlig" längd och inga uppenbara sifferrader
-        if(line.length <= 60 && !/\d/.test(line)) return line;
+      // undanta generella rubriker
+      if (/Kommunala gymnasieskolor/i.test(line)) return null;
+      // fallback: rena namn som slutar på skolan/gymnasiet
+      if(/(skolan|gymnasiet|gymnasium)\.?$/i.test(line) && !/\d/.test(line) && line.length <= 60){
+        return line.trim();
       }
       return null;
     }
 
-    // Rensa PDF-artefakter
-    function fixSplits(s){
-      return s.replace(/\u00AD/g,'')
-              .replace(/\boc h\b/gi,'och')
-              .replace(/\s-\s+/g,' - ')
-              .replace(/\s{2,}/g,' ')
-              .trim();
+    // Programrad → { program, lagsta } eller null
+    // Radens högra del slutar med programnamn (…progr. / programmet / Yrkesintro. mot …),
+    // radens vänstra del innehåller flera tal där det ANDRA är "Lägsta".
+    const programTailRe =
+      /(Programinriktat val mot .*?|Yrkesintro\.\s*mot .*?|[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+?progr\.(?:\s*-\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+)?
+      )(?!.*\bprogr\.)/i;
+
+    function parseProgramRow(line){
+      const m = line.match(programTailRe);
+      if(!m) return null;
+      const program = m[0]
+        .replace(/programmet/gi,'progr.')
+        .replace(/\s{2,}/g,' ')
+        .trim();
+      const left = line.slice(0, m.index).trim();
+      const nums = Array.from(left.matchAll(/\b\d{1,3}(?:[.,]\d+)?\b/g))
+                        .map(x => parseFloat(x[0].replace(',','.')));
+      if(nums.length < 2) return null; // behöver minst två tal för att kunna ta "Lägsta"
+      const lagsta = nums[1]; // enligt layout: andra numret = Lägsta jämförelsetal
+      return { program, lagsta };
     }
 
-    // Plocka ut alla programnamn ur en sammansatt Studieväg-text
-    function extractProgramsFromStudievag(text){
-      const t = fixSplits(text);
-      const matches = [];
-      const re = new RegExp(
-        [
-          // Programinriktat val mot ...progr. (ev. "- Transport" variant)
-          '(Programinriktat val mot [A-Za-zÅÄÖåäöÉéÜüÏïÖö\\- och\\.]+?progr(?:\\.- Transport)?\\.)',
-          // Yrkesintro. mot ...progr.
-          '(Yrkesintro\\.\\s*mot [A-Za-zÅÄÖåäöÉéÜüÏïÖö\\- och\\.]+?progr(?:\\.- Transport)?\\.)',
-          // Vanliga program, slutar på "progr." eller förkortat "pr."
-          '([A-ZÅÄÖa-zåäöÉéÜüÏïÖö\\- ]+?progr\\.|[A-ZÅÄÖa-zåäöÉéÜüÏïÖö\\- ]+?pr\\.)'
-        ].join('|'),
-        'g'
-      );
-      let m;
-      while((m = re.exec(t)) !== null){
-        const hit = (m[1] || m[2] || m[3] || '').trim();
-        if(hit){
-          // Städa "pr." -> "progr." om det ser ut som förkortat program
-          const cleaned = hit
-            .replace(/\bpr\.\b/g,'progr.')
-            .replace(/programmet/gi,'progr.')
-            .replace(/\s{2,}/g,' ')
-            .trim();
-          matches.push(cleaned);
-        }
-      }
-      // Filtrera bort ensamma "stv."/skräp
-      return matches.filter(s => !/^stv\.?$/i.test(s));
-    }
+    async function parsePdfFromArrayBuffer(buf){
+      const loadingTask = pdfjsLib.getDocument({ data: buf });
+      const pdf = await loadingTask.promise;
 
-    // Samla merit-lista (decimaltal) efter "Lägsta jämförelsetal"
-    function collectMerits(lines, startIdx){
-      const vals = [];
-      for(let i=startIdx+1; i<lines.length; i++){
-        const L = lines[i];
-        if(!isMostlyNumbers(L)) break;
-        const nums = Array.from(L.matchAll(/\b\d{1,3}(?:[.,]\d+)?\b/g))
-                          .map(m => parseFloat(m[0].replace(',','.')))
-                          .filter(v => v>=0 && v<=340);
-        vals.push(...nums);
-      }
-      return vals;
-    }
-
-    async function parseCommon(pdf){
       let currentSchool = null;
-      let pendingSchool = null;
-      let programs = [];
-      let merits = [];
       const out = [];
-      const debug = [];
-
-      function flush(){
-        if(currentSchool && programs.length && merits.length){
-          const n = Math.min(programs.length, merits.length);
-          for(let i=0;i<n;i++){
-            out.push([currentSchool, programs[i], merits[i]]);
-          }
-        }
-        programs = [];
-        merits = [];
-      }
+      const debugLines = [];
 
       for(let p=1; p<=pdf.numPages; p++){
         const page = await pdf.getPage(p);
         const textContent = await page.getTextContent();
         const lines = itemsToLines(textContent.items);
 
-        // debug-lagring
         for(const L of lines){
-          if(debug.length<80) debug.push(L);
+          if(debugLines.length < 120) debugLines.push(L);
         }
 
-        for(let i=0;i<lines.length;i++){
-          const lineRaw = lines[i];
-          const line = norm(lineRaw);
+        for(const line of lines){
+          const sch = detectSchool(line);
+          if(sch) { currentSchool = sch; continue; }
 
-          // Skolnamn
-          const maybe = detectSchool(line);
-          if(maybe){
-            // Om vi redan har data för förra skolan: flush
-            if(currentSchool && (programs.length || merits.length)) flush();
-            // Sätt preliminärt – bekräftas av att vi senare stöter på MARKER_ANY,
-            // men i många PDF:er är detta redan rätt (exv. "Alléskolan").
-            pendingSchool = maybe;
-          }
-          if(line.includes(MARKER_ANY)){
-            // Bekräfta skolnamn
-            currentSchool = pendingSchool || currentSchool;
-          }
-
-          // Studieväg – samla program
-          if(line.startsWith(STUDIEVAG)){
-            // samla ihop allt program-text på samma "block" (nuvarande rad + ev. följande rader
-            // som innehåller "progr."/"Yrkesintro." etc.) tills vi träffar nästa rubrik/nummerblock
-            let block = '';
-            for(let j=i+1; j<lines.length; j++){
-              const L = lines[j];
-              if(/Antal|Medianvärde|Lägsta jämförelsetal|Sydnärkes|Studieväg|Slutlig antagningsstatistik/i.test(L)) break;
-              // heuristiskt: ta rader som innehåller "progr" eller "Yrkesintro" eller ser ut som sammanslagna programlistor
-              if(/progr|Yrkesintro|Programinriktat val/i.test(L) || / [A-ZÅÄÖ].+progr\./.test(L)){
-                block += ' ' + L;
-              } else {
-                // Om raden är tydligt siffror/metadata – avsluta blocket
-                if(isMostlyNumbers(L)) break;
-              }
+          if(/progr|programmet|Yrkesintro\./i.test(line)){
+            const hit = parseProgramRow(line);
+            if(hit && currentSchool){
+              out.push([currentSchool, hit.program, hit.lagsta]);
             }
-            const extracted = extractProgramsFromStudievag(block);
-            if(extracted.length) programs.push(...extracted);
-          }
-
-          // Lägsta jämförelsetal – samla merits
-          if(line.startsWith(LOWEST_HDR)){
-            const vals = collectMerits(lines, i);
-            if(vals.length) merits.push(...vals);
           }
         }
       }
-
-      // sista flush
-      if(currentSchool && (programs.length || merits.length)) flush();
-
-      debugEl.textContent = debug.join('\n');
+      debugEl.textContent = debugLines.join('\n');
       return out;
-    }
-
-    async function parsePdfFromArrayBuffer(buf){
-      const loadingTask = pdfjsLib.getDocument({ data: buf });
-      const pdf = await loadingTask.promise;
-      return parseCommon(pdf);
     }
 
     function renderRows(rows){
@@ -258,6 +169,31 @@
       }
       outTable.hidden = false;
       statusEl.textContent = `Klar — ${rows.length} rader`;
+      exportCsvBtn.disabled = rows.length === 0;
+      exportCsvBtn.onclick = () => exportCSV(rows);
+    }
+
+    // Svensk CSV: semikolon + decimalkomma
+    function exportCSV(rows){
+      const header = ['Skola','Inriktning','Lägsta Merit'];
+      const esc = (s) => `"${String(s).replace(/"/g,'""')}"`;
+      const fmtNumSV = (v) => (typeof v === 'number' ? String(v).replace('.', ',') : String(v));
+      const delimiter = ';';
+
+      const body = rows.map(([skola, inr, lag]) =>
+        [esc(skola), esc(inr), esc(fmtNumSV(lag))].join(delimiter)
+      );
+      const csv = [header.map(esc).join(delimiter), ...body].join('\n');
+
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'antagning_orebro_2025.csv';
+      document.body.appendChild(a);
+      a.click();
+      URL.revokeObjectURL(url);
+      a.remove();
     }
 
     document.getElementById('parseFileBtn').addEventListener('click', async () => {
@@ -265,6 +201,7 @@
       if(!f){ alert('Välj en PDF-fil först.'); return; }
       statusEl.textContent = 'Läser PDF…';
       outTable.hidden = true;
+      exportCsvBtn.disabled = true;
       try{
         const buf = await f.arrayBuffer();
         const rows = await parsePdfFromArrayBuffer(buf);
@@ -274,6 +211,13 @@
         statusEl.textContent = 'Fel vid parsning: ' + err.message;
       }
     });
+
+    // Dämpa pdf.js-varningar om TT-funktioner (failsafe)
+    try {
+      if (pdfjsLib.VerbosityLevel) {
+        pdfjsLib.GlobalWorkerOptions.verbosity = pdfjsLib.VerbosityLevel.ERROR;
+      }
+    } catch {}
   </script>
 </body>
 </html>
