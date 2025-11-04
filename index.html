@@ -6,8 +6,7 @@
   <title>Utdrag: Slutlig antagning – Örebro län</title>
   <style>
     :root{
-      --bg:#0b0f14;--fg:#e7effa;--muted:#94a3b8;--panel:#0f172a;--accent:#22c55e;
-      --border:#1f2937;
+      --bg:#0b0f14;--fg:#e7effa;--muted:#94a3b8;--panel:#0f172a;--accent:#22c55e;--border:#1f2937;
     }
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
     header{padding:16px 20px;background:#0f172a;position:sticky;top:0;z-index:10;border-bottom:1px solid var(--border)}
@@ -24,9 +23,8 @@
     .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#111827;border:1px solid var(--border);font-size:12px}
   </style>
 
-  <!-- pdf.js (UMD) + worker, båda med defer -->
+  <!-- pdf.js (UMD) – huvudbiblioteket -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.min.js" defer></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.min.js" defer></script>
 </head>
 <body>
   <header>
@@ -46,36 +44,39 @@
       </thead>
       <tbody></tbody>
     </table>
+    <p id="note" class="muted">Tips: Om något ser fel ut, hojta så finjusterar jag reglerna (PDF-textlager kan vara luriga).</p>
   </main>
 
   <script>
     document.addEventListener('DOMContentLoaded', async () => {
-      // Se till att pdfjsLib finns, annars försök ESM-import som fallback
-      if (typeof window.pdfjsLib === 'undefined') {
-        try {
-          const mod = await import('https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.mjs');
-          window.pdfjsLib = mod;
-        } catch (e) {
-          console.error('Kunde inte ladda pdf.js', e);
-        }
-      }
-
       const statusEl = document.getElementById('status');
       const outTable = document.getElementById('outTable');
       const tbody = outTable.querySelector('tbody');
       const parseBtn = document.getElementById('parseBtn');
 
+      // Säkerställ att pdfjsLib finns
       if (typeof window.pdfjsLib === 'undefined') {
         statusEl.textContent = 'Kunde inte ladda pdf.js – kontrollera nätverk/CSP.';
         parseBtn.disabled = true;
         return;
       }
 
-      // Ställ in workerSrc (viktigt när du hostar på egen sida)
+      // === FIX: Skapa en same-origin Worker via Blob så vi slipper CORS/dynamic import-problem ===
       try {
-        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.min.js';
-      } catch {}
+        const workerBlob = new Blob(
+          [
+            // Klassisk worker laddar UMD-workerfilen via importScripts
+            `importScripts('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.min.js');`
+          ],
+          { type: 'text/javascript' }
+        );
+        const workerUrl = URL.createObjectURL(workerBlob);
+        const worker = new Worker(workerUrl); // classic worker
+        // Peka pdf.js till vår worker
+        window.pdfjsLib.GlobalWorkerOptions.workerPort = worker;
+      } catch (e) {
+        console.warn('Kunde inte skapa Blob-worker, fortsätter (kan bli långsammare):', e);
+      }
 
       const MARKER = 'Slutlig antagningsstatistik för';
       const NORM_RE = /\s+/g;
@@ -97,14 +98,15 @@
 
       function fixCommonSplits(s){
         return s
-          .replace(/\u00AD/g,'')
-          .replace(/\boc h\b/gi,'och')
+          .replace(/\u00AD/g,'')       // mjukt bindestreck
+          .replace(/\boc h\b/gi,'och') // "oc h" -> "och"
           .replace(/\s-\s+/g,' - ')
           .replace(/\s{2,}/g,' ')
           .trim();
       }
 
       function stripLeadingCodes(s){
+        // Ta bort ledande siffror/koder som trillar in före inriktningen
         return s.replace(/^(?:\d+\s+){0,5}(?:[A-ZÅÄÖ]{1,5}\s+){0,3}(?:\d+\s+){0,3}/,'').trim();
       }
 
@@ -150,14 +152,13 @@
         const nums = Array.from(line.matchAll(/\b\d{1,3}(?:[.,]\d+)?\b/g))
                           .map(m => parseFloat(m[0].replace(',','.')))
                           .filter(v => !Number.isNaN(v));
-
         if(!nums.length) return null;
 
         const candidates = nums.filter(v => v >= 0 && v <= 340);
         const pool = candidates.length ? candidates : nums;
         const min = Math.min(...pool);
-
         if(min === 0) return 0;
+
         return Math.round(min*100)/100;
       }
 
