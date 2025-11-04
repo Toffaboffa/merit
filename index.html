@@ -23,8 +23,8 @@
     .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#111827;border:1px solid var(--border);font-size:12px}
   </style>
 
-  <!-- pdf.js (UMD) – huvudbiblioteket -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.min.js" defer></script>
+  <!-- Self-hosted pdf.js (lägg dessa filer i din repo under vendor/pdfjs/) -->
+  <script src="vendor/pdfjs/pdf.min.js" defer></script>
 </head>
 <body>
   <header>
@@ -44,7 +44,7 @@
       </thead>
       <tbody></tbody>
     </table>
-    <p id="note" class="muted">Tips: Om något ser fel ut, hojta så finjusterar jag reglerna (PDF-textlager kan vara luriga).</p>
+    <p id="note" class="muted">Tips: Om något ser fel ut, säg till så finjusterar jag reglerna (PDF-textlager kan vara luriga).</p>
   </main>
 
   <script>
@@ -54,30 +54,20 @@
       const tbody = outTable.querySelector('tbody');
       const parseBtn = document.getElementById('parseBtn');
 
-      // Säkerställ att pdfjsLib finns
       if (typeof window.pdfjsLib === 'undefined') {
-        statusEl.textContent = 'Kunde inte ladda pdf.js – kontrollera nätverk/CSP.';
+        statusEl.textContent = 'Kunde inte ladda pdf.js (self-hosted). Kontrollera sökvägen vendor/pdfjs/pdf.min.js';
         parseBtn.disabled = true;
         return;
       }
 
-      // === FIX: Skapa en same-origin Worker via Blob så vi slipper CORS/dynamic import-problem ===
+      // Worker: peka på din lokala worker-fil (self-hosted)
       try {
-        const workerBlob = new Blob(
-          [
-            // Klassisk worker laddar UMD-workerfilen via importScripts
-            `importScripts('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.min.js');`
-          ],
-          { type: 'text/javascript' }
-        );
-        const workerUrl = URL.createObjectURL(workerBlob);
-        const worker = new Worker(workerUrl); // classic worker
-        // Peka pdf.js till vår worker
-        window.pdfjsLib.GlobalWorkerOptions.workerPort = worker;
-      } catch (e) {
-        console.warn('Kunde inte skapa Blob-worker, fortsätter (kan bli långsammare):', e);
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdfjs/pdf.worker.min.js';
+      } catch(e) {
+        console.warn('Kunde inte sätta workerSrc:', e);
       }
 
+      // -------- Parsningslogik --------
       const MARKER = 'Slutlig antagningsstatistik för';
       const NORM_RE = /\s+/g;
 
@@ -99,14 +89,14 @@
       function fixCommonSplits(s){
         return s
           .replace(/\u00AD/g,'')       // mjukt bindestreck
-          .replace(/\boc h\b/gi,'och') // "oc h" -> "och"
+          .replace(/\boc h\b/gi,'och') // spjälkningar
           .replace(/\s-\s+/g,' - ')
           .replace(/\s{2,}/g,' ')
           .trim();
       }
 
       function stripLeadingCodes(s){
-        // Ta bort ledande siffror/koder som trillar in före inriktningen
+        // Ta bort ledande siffror/koder (kolumnspill):
         return s.replace(/^(?:\d+\s+){0,5}(?:[A-ZÅÄÖ]{1,5}\s+){0,3}(?:\d+\s+){0,3}/,'').trim();
       }
 
