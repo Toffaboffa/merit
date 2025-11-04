@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Utdrag: Slutlig antagning – Örebro län (ESM + CORS-fallback)</title>
+  <title>Utdrag: Slutlig antagning – Örebro län (ESM + robust radbygge)</title>
   <style>
     :root{ --bg:#0b0f14; --fg:#e7effa; --muted:#94a3b8; --panel:#0f172a; --accent:#22c55e; --border:#1f2937; }
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
@@ -19,20 +19,21 @@
     tr:hover td{background:#0c1222}
     .muted{color:var(--muted)}
     .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#111827;border:1px solid var(--border);font-size:12px}
-    small{display:block;margin-top:6px;color:var(--muted)}
+    details{margin-top:14px}
+    pre{white-space:pre-wrap;font-size:12px;background:#0f172a;border:1px solid var(--border);padding:10px;border-radius:8px;max-height:300px;overflow:auto}
   </style>
 </head>
 <body>
   <header>
     <div class="row">
-      <input id="pdfUrl" type="url" placeholder="Direktlänk till PDF (kräver att CORS är tillåtet)" />
+      <input id="pdfUrl" type="url" placeholder="Direktlänk till PDF (kräver CORS)" />
       <button id="parseUrlBtn">Skapa lista från URL</button>
       <span id="status" class="muted"></span>
     </div>
     <div class="row" style="margin-top:8px">
       <input id="pdfFile" type="file" accept="application/pdf" />
       <button id="parseFileBtn">Skapa lista från fil</button>
-      <small>TIP: Om URL ger “Failed to fetch”, välj PDF-filen här (ingen CORS).</small>
+      <small class="muted">TIP: Om URL ger “Failed to fetch”, välj PDF-filen här (ingen CORS).</small>
     </div>
     <div class="muted" style="margin-top:8px">
       Format: <span class="pill">Skola</span> <span class="pill">Inriktning</span> <span class="pill">Lägsta Merit</span>
@@ -46,43 +47,83 @@
       </thead>
       <tbody></tbody>
     </table>
-    <p class="muted">Om något ser konstigt ut i texten (PDF-artefakter), kan jag justera reglerna.</p>
+
+    <details>
+      <summary>Visa första 60 rader (debug)</summary>
+      <pre id="debugLines"></pre>
+    </details>
   </main>
 
   <script type="module">
-    import * as pdfjsLib from './vendor/pdfjs/pdf.mjs';  // <-- justera path vid behov
-    // Starta worker som ESM
+    // Anpassa sökvägarna till där du lagt dina filer:
+    import * as pdfjsLib from './vendor/pdfjs/pdf.mjs';
     const worker = new Worker('./vendor/pdfjs/pdf.worker.mjs', { type: 'module' });
     pdfjsLib.GlobalWorkerOptions.workerPort = worker;
 
     const statusEl = document.getElementById('status');
     const outTable = document.getElementById('outTable');
     const tbody = outTable.querySelector('tbody');
+    const debugEl = document.getElementById('debugLines');
 
-    const MARKER = 'Slutlig antagningsstatistik för';
+    const MARKER_PART = 'Slutlig antagningsstatistik'; // räcker (ibland “för” bryts)
     const NORM_RE = /\s+/g;
     const norm = s => (s||'').replace(NORM_RE,' ').trim();
 
-    const extractSchool = (line) => {
-      if(line.includes(MARKER)){
-        const before = line.split(MARKER)[0].trim();
+    // ---- Bygg rader av pdf.js-items via y/x-klustring ----
+    function itemsToLines(items){
+      // Varje item har transform = [a,b,c,d,e,f]; f ~ y, e ~ x (i sidans textmatris)
+      const rows = new Map(); // key = kvantiserad y, value = array of {x, str}
+      const yQuant = 2; // px-kvantisering (justera vid behov)
+      for(const it of items){
+        const t = it.transform;
+        const y = t[5], x = t[4];
+        const key = Math.round(y / yQuant) * yQuant;
+        if(!rows.has(key)) rows.set(key, []);
+        rows.get(key).push({ x, str: it.str });
+      }
+      // sortera rader från topp till botten (pdf.js har ofta hög y högst upp)
+      const ys = Array.from(rows.keys()).sort((a,b)=> b-a);
+      const lines = [];
+      for(const y of ys){
+        const bits = rows.get(y).sort((a,b)=> a.x - b.x).map(b=>b.str);
+        const line = norm(bits.join(' '));
+        if(line) lines.push(line);
+      }
+      return lines;
+    }
+
+    // ---- Heuristiker för skol-/programrader ----
+    function extractSchool(line){
+      if(line.includes(MARKER_PART)){
+        // Ta allt före markören (skolnamn kan ligga direkt ihop)
+        const before = line.split(MARKER_PART)[0].trim();
         const clean = before.replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö \-\.]/g,'');
         if(clean) return clean.trim();
       }
       return null;
-    };
+    }
 
-    const likelyProgramLine = (line) =>
-      /progr/i.test(line) || /programmet/i.test(line) || /Yrkesintro\./i.test(line) || /Introduktionsprogrammet/i.test(line);
+    function likelyProgramLine(line){
+      return /progr/i.test(line) || /programmet/i.test(line) || /Yrkesintro\./i.test(line) || /Introduktionsprogrammet/i.test(line);
+    }
 
-    const fixCommonSplits = (s) =>
-      s.replace(/\u00AD/g,'').replace(/\boc h\b/gi,'och').replace(/\s-\s+/g,' - ').replace(/\s{2,}/g,' ').trim();
+    function fixCommonSplits(s){
+      return s
+        .replace(/\u00AD/g,'')       // mjukt bindestreck
+        .replace(/\boc h\b/gi,'och') // “oc h” -> “och”
+        .replace(/\s-\s+/g,' - ')
+        .replace(/\s{2,}/g,' ')
+        .trim();
+    }
 
-    const stripLeadingCodes = (s) =>
-      s.replace(/^(?:\d+\s+){0,5}(?:[A-ZÅÄÖ]{1,5}\s+){0,3}(?:\d+\s+){0,3}/,'').trim();
+    function stripLeadingCodes(s){
+      // Rensa kolumnspill (siffror/koder före inriktning)
+      return s.replace(/^(?:\d+\s+){0,6}(?:[A-ZÅÄÖ]{1,6}\s+){0,4}(?:\d+\s+){0,4}/,'').trim();
+    }
 
     function extractInriktning(rawLine){
       let line = fixCommonSplits(rawLine);
+
       let m =
         line.match(/([A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9.\-–,()/: ]*progr\.?[^\d]*)$/i) ||
         line.match(/(Yrkesintro\.[A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9.\-–,()/: ]*)$/i)   ||
@@ -119,28 +160,22 @@
       return min === 0 ? 0 : Math.round(min*100)/100;
     }
 
-    async function parsePdfFromUrl(url){
-      const loadingTask = pdfjsLib.getDocument({ url });   // kräver CORS
-      return parseCommon(await loadingTask.promise);
-    }
-
-    async function parsePdfFromArrayBuffer(buf){
-      const loadingTask = pdfjsLib.getDocument({ data: buf }); // ingen CORS
-      return parseCommon(await loadingTask.promise);
-    }
-
     async function parseCommon(pdf){
       let currentSchool = null;
       const out = [];
+      const debugLines = [];
+
       for(let p=1; p<=pdf.numPages; p++){
         const page = await pdf.getPage(p);
         const textContent = await page.getTextContent();
-        const lines = textContent.items
-          .map(it => it.str)
-          .join('\n')
-          .split(/\n+/)
-          .map(norm)
-          .filter(Boolean);
+        const lines = itemsToLines(textContent.items);
+
+        // samla debug från första sidorna
+        if(debugLines.length < 60){
+          for(const L of lines){
+            if(debugLines.length < 60) debugLines.push(L);
+          }
+        }
 
         for(const line of lines){
           const s = extractSchool(line);
@@ -156,7 +191,21 @@
           }
         }
       }
+
+      debugEl.textContent = debugLines.join('\n');
       return out;
+    }
+
+    async function parsePdfFromUrl(url){
+      const loadingTask = pdfjsLib.getDocument({ url });
+      const pdf = await loadingTask.promise;
+      return parseCommon(pdf);
+    }
+
+    async function parsePdfFromArrayBuffer(buf){
+      const loadingTask = pdfjsLib.getDocument({ data: buf });
+      const pdf = await loadingTask.promise;
+      return parseCommon(pdf);
     }
 
     function renderRows(rows){
@@ -183,7 +232,7 @@
         renderRows(rows);
       }catch(err){
         console.error(err);
-        statusEl.textContent = 'Fel vid parsning (URL): ' + err.message + ' — troligen CORS. Testa fil-fliken nedan eller ladda upp PDF i samma repo.';
+        statusEl.textContent = 'Fel vid parsning (URL): ' + err.message + ' — troligen CORS. Testa fil-fliken.';
       }
     });
 
@@ -202,7 +251,7 @@
       }
     });
 
-    // Valfritt: auto-fyll via ?pdf=
+    // Fyll URL från ?pdf=
     const params = new URLSearchParams(location.search);
     if(params.has('pdf')) document.getElementById('pdfUrl').value = params.get('pdf');
   </script>
