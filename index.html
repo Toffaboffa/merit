@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Utdrag: Slutlig antagning – Örebro län</title>
+  <style>
+    :root{
+      --bg:#0b0f14;--fg:#e7effa;--muted:#94a3b8;--panel:#0f172a;--accent:#22c55e;
+      --border:#1f2937;
+    }
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
+    header{padding:16px 20px;background:#0f172a;position:sticky;top:0;z-index:10;border-bottom:1px solid var(--border)}
+    main{max-width:1100px;margin:0 auto;padding:20px}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    input[type=url]{flex:1;min-width:320px;padding:10px;border-radius:10px;border:1px solid var(--border);background:#0f172a;color:var(--fg)}
+    button{padding:10px 14px;border-radius:10px;border:0;background:var(--accent);color:#05280f;font-weight:700;cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    table{width:100%;border-collapse:collapse;margin-top:20px;background:#0f172a;border:1px solid var(--border);border-radius:12px;overflow:hidden}
+    th,td{padding:10px;border-bottom:1px solid var(--border);text-align:left;font-size:14px}
+    th{background:#0d1326;position:sticky;top:76px}
+    tr:hover td{background:#0c1222}
+    .muted{color:var(--muted)}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#111827;border:1px solid var(--border);font-size:12px}
+  </style>
+  <!-- pdf.js via CDN (utan extra worker-config krävs i 4.x) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="row">
+      <input id="pdfUrl" type="url" placeholder="Klistra in direktlänk till PDF med antagningsstatistik" value="" />
+      <button id="parseBtn">Skapa lista</button>
+      <span id="status" class="muted"></span>
+    </div>
+    <div class="muted" style="margin-top:8px">
+      Format: <span class="pill">Skola</span> <span class="pill">Inriktning</span> <span class="pill">Lägsta Merit</span>
+    </div>
+  </header>
+  <main>
+    <table id="outTable" hidden>
+      <thead>
+        <tr><th>Skola</th><th>Inriktning</th><th>Lägsta Merit</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="note" class="muted">Tips: Om något ser fel ut, hojta så finjusterar jag reglerna (PDF-textlager kan vara luriga).</p>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const outTable = document.getElementById('outTable');
+    const tbody = outTable.querySelector('tbody');
+
+    const MARKER = 'Slutlig antagningsstatistik för';
+
+    const NORM_RE = /\s+/g;
+    function norm(s){ return (s||'').replace(NORM_RE,' ').trim(); }
+
+    // ————— Heuristiker —————
+    function extractSchool(line){
+      if(line.includes(MARKER)){
+        const before = line.split(MARKER)[0].trim();
+        const clean = before.replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö \-\.]/g,'');
+        if(clean) return clean.trim();
+      }
+      return null;
+    }
+
+    function likelyProgramLine(line){
+      // Träffar "progr." / "programmet" och även "Yrkesintro."
+      return /progr/i.test(line) || /programmet/i.test(line) || /Yrkesintro\./i.test(line) || /Introduktionsprogrammet/i.test(line);
+    }
+
+    // Lagningar på sönderstyckade ord/typiska fel
+    function fixCommonSplits(s){
+      return s
+        .replace(/\u00AD/g,'')         // mjukt bindestreck
+        .replace(/\boc h\b/gi,'och')   // "oc h" -> "och"
+        .replace(/\s-\s+/g,' - ')
+        .replace(/\s{2,}/g,' ')
+        .trim();
+    }
+
+    function stripLeadingCodes(s){
+      // Ta bort ledande kolumnsiffror och programkoder som hamnar före inriktningen:
+      // Ex: "0 34 2 DBG 0 Yrkesintro. mot Frisör- och stylistprogr. - Hår- och makeupstylist"
+      // Mönster: ett gäng tal, ev. 1–2 korta versala kodblock, ev. tal igen, mellanslag…
+      return s.replace(
+        /^(?:\d+\s+){0,5}(?:[A-ZÅÄÖ]{1,5}\s+){0,3}(?:\d+\s+){0,3}/,
+        ''
+      ).trim();
+    }
+
+    function extractInriktning(rawLine){
+      let line = fixCommonSplits(rawLine);
+
+      // Plocka ut del som slutar med "progr." eller innehåller "Yrkesintro."
+      let m =
+        line.match(/([A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9\.\-–,()/: ]*progr\.?[^\d]*)$/i) ||
+        line.match(/(Yrkesintro\.[A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9\.\-–,()/: ]*)$/i)   ||
+        line.match(/(Introduktionsprogrammet[A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9\.\-–,()/: ]*)$/i);
+
+      let inr = m ? norm(m[1]) : null;
+
+      if(!inr){
+        // Fallback: ta suffixet efter valfri kod, om det ser ut som ett programnamn
+        const m2 = line.match(/(?:[A-ZÅÄÖ]{1,3}\s*\d{1,3})\s*([A-Za-zÅÄÖåäöÉéÜüÏïÖö\.\-–,()/: ]+)$/);
+        if(m2) inr = norm(m2[1]);
+      }
+
+      if(!inr){
+        // Sista fallback: om raden innehåller progr/yrkesintro, ta hela och städa
+        if(likelyProgramLine(line)) inr = line;
+      }
+
+      if(!inr) return null;
+
+      // Rensa bort ledande koder/siffror som smugit sig in
+      inr = stripLeadingCodes(inr);
+
+      // Standardisera "progr."
+      inr = inr
+        .replace(/programmet/gi,'progr.')
+        .replace(/progr\s*\./gi,'progr.')
+        .replace(/\s{2,}/g,' ')
+        .trim();
+
+      // Extra smålagningar
+      inr = inr
+        .replace(/\bmot\b/gi,'mot')           // normalisera mellanrum
+        .replace(/\s-\s/g,' - ')
+        .replace(/\s,/,',')
+        .trim();
+
+      return inr;
+    }
+
+    function extractLagsta(line){
+      // Hämta decimaltal (svenska/engelska). Meritintervall sätts rimligt (0–340).
+      const nums = Array.from(line.matchAll(/\b\d{1,3}(?:[.,]\d+)?\b/g))
+                        .map(m => parseFloat(m[0].replace(',','.')))
+                        .filter(v => !Number.isNaN(v));
+
+      if(!nums.length) return null;
+
+      // Välj minsta tal inom ett rimligt meritspann.
+      const candidates = nums.filter(v => v >= 0 && v <= 340);
+      const pool = candidates.length ? candidates : nums;
+
+      const min = Math.min(...pool);
+
+      // Om raden har en explicit ensam "0" och inget annat vettigt – tillåt 0.
+      if(min === 0) return 0;
+
+      return Math.round(min*100)/100;
+    }
+
+    async function parsePdf(url){
+      const pdf = await pdfjsLib.getDocument({ url }).promise;
+      let currentSchool = null;
+      const out = [];
+
+      for(let p=1; p<=pdf.numPages; p++){
+        const page = await pdf.getPage(p);
+        const textContent = await page.getTextContent();
+
+        // pdf.js returnerar många små “items”; vi gör en enkel radsträng av dessa
+        const lines = textContent.items
+          .map(it => it.str)
+          .join('\n')
+          .split(/\n+/)
+          .map(norm)
+          .filter(Boolean);
+
+        for(const line of lines){
+          const s = extractSchool(line);
+          if(s) { currentSchool = s; continue; }
+
+          if(!currentSchool) continue;
+
+          if(likelyProgramLine(line)){
+            const inr = extractInriktning(line);
+            const lag = extractLagsta(line);
+            if(currentSchool && inr && lag !== null){
+              out.push([currentSchool, inr, lag]);
+            }
+          }
+        }
+      }
+
+      return out;
+    }
+
+    document.getElementById('parseBtn').addEventListener('click', async ()=>{
+      const url = document.getElementById('pdfUrl').value.trim();
+      if(!url){ alert('Klistra in en direktlänk till PDF:en först.'); return; }
+
+      statusEl.textContent = 'Läser PDF…';
+      outTable.hidden = true;
+      tbody.innerHTML = '';
+
+      try{
+        const rows = await parsePdf(url);
+        rows.sort((a,b)=> (a[0]===b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
+
+        for(const [skola,inr,lag] of rows){
+          const tr = document.createElement('tr');
+          const td1 = document.createElement('td'); td1.textContent = skola; tr.appendChild(td1);
+          const td2 = document.createElement('td'); td2.textContent = inr;   tr.appendChild(td2);
+          const td3 = document.createElement('td'); td3.textContent = (typeof lag==='number' ? lag.toString() : lag); tr.appendChild(td3);
+          tbody.appendChild(tr);
+        }
+
+        outTable.hidden = false;
+        statusEl.textContent = `Klar — ${rows.length} rader`;
+      }catch(err){
+        console.error(err);
+        statusEl.textContent = 'Fel vid parsning: ' + err.message;
+      }
+    });
+  </script>
+</body>
+</html>
