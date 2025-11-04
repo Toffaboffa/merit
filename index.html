@@ -3,35 +3,42 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Utdrag: Slutlig antagning – Örebro län (ESM)</title>
+  <title>Utdrag: Slutlig antagning – Örebro län (ESM + CORS-fallback)</title>
   <style>
     :root{ --bg:#0b0f14; --fg:#e7effa; --muted:#94a3b8; --panel:#0f172a; --accent:#22c55e; --border:#1f2937; }
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
     header{padding:16px 20px;background:#0f172a;position:sticky;top:0;z-index:10;border-bottom:1px solid var(--border)}
     main{max-width:1100px;margin:0 auto;padding:20px}
     .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-    input[type=url]{flex:1;min-width:320px;padding:10px;border-radius:10px;border:1px solid var(--border);background:#0f172a;color:var(--fg)}
+    input[type=url],input[type=file]{flex:1;min-width:260px;padding:10px;border-radius:10px;border:1px solid var(--border);background:#0f172a;color:var(--fg)}
     button{padding:10px 14px;border-radius:10px;border:0;background:var(--accent);color:#05280f;font-weight:700;cursor:pointer}
     button:disabled{opacity:.5;cursor:not-allowed}
     table{width:100%;border-collapse:collapse;margin-top:20px;background:#0f172a;border:1px solid var(--border);border-radius:12px;overflow:hidden}
     th,td{padding:10px;border-bottom:1px solid var(--border);text-align:left;font-size:14px}
-    th{background:#0d1326;position:sticky;top:76px}
+    th{background:#0d1326;position:sticky;top:112px}
     tr:hover td{background:#0c1222}
     .muted{color:var(--muted)}
     .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#111827;border:1px solid var(--border);font-size:12px}
+    small{display:block;margin-top:6px;color:var(--muted)}
   </style>
 </head>
 <body>
   <header>
     <div class="row">
-      <input id="pdfUrl" type="url" placeholder="Klistra in direktlänk till PDF med antagningsstatistik" />
-      <button id="parseBtn">Skapa lista</button>
+      <input id="pdfUrl" type="url" placeholder="Direktlänk till PDF (kräver att CORS är tillåtet)" />
+      <button id="parseUrlBtn">Skapa lista från URL</button>
       <span id="status" class="muted"></span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <input id="pdfFile" type="file" accept="application/pdf" />
+      <button id="parseFileBtn">Skapa lista från fil</button>
+      <small>TIP: Om URL ger “Failed to fetch”, välj PDF-filen här (ingen CORS).</small>
     </div>
     <div class="muted" style="margin-top:8px">
       Format: <span class="pill">Skola</span> <span class="pill">Inriktning</span> <span class="pill">Lägsta Merit</span>
     </div>
   </header>
+
   <main>
     <table id="outTable" hidden>
       <thead>
@@ -39,58 +46,43 @@
       </thead>
       <tbody></tbody>
     </table>
-    <p id="note" class="muted">Tips: Om något ser fel ut, säg till så finjusterar jag reglerna (PDF-textlager kan vara luriga).</p>
+    <p class="muted">Om något ser konstigt ut i texten (PDF-artefakter), kan jag justera reglerna.</p>
   </main>
 
-  <!-- All logik som ESM (importerar pdf.mjs och startar worker som module) -->
   <script type="module">
-    import * as pdfjsLib from './vendor/pdfjs/pdf.mjs';         // <- ändra sökväg vid behov
-
-    // Starta worker som ESM och koppla in i pdf.js
+    import * as pdfjsLib from './vendor/pdfjs/pdf.mjs';  // <-- justera path vid behov
+    // Starta worker som ESM
     const worker = new Worker('./vendor/pdfjs/pdf.worker.mjs', { type: 'module' });
     pdfjsLib.GlobalWorkerOptions.workerPort = worker;
 
-    // ---------- UI ----------
     const statusEl = document.getElementById('status');
     const outTable = document.getElementById('outTable');
     const tbody = outTable.querySelector('tbody');
-    const parseBtn = document.getElementById('parseBtn');
 
     const MARKER = 'Slutlig antagningsstatistik för';
     const NORM_RE = /\s+/g;
-
     const norm = s => (s||'').replace(NORM_RE,' ').trim();
 
-    function extractSchool(line){
+    const extractSchool = (line) => {
       if(line.includes(MARKER)){
         const before = line.split(MARKER)[0].trim();
         const clean = before.replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö \-\.]/g,'');
         if(clean) return clean.trim();
       }
       return null;
-    }
+    };
 
-    function likelyProgramLine(line){
-      return /progr/i.test(line) || /programmet/i.test(line) || /Yrkesintro\./i.test(line) || /Introduktionsprogrammet/i.test(line);
-    }
+    const likelyProgramLine = (line) =>
+      /progr/i.test(line) || /programmet/i.test(line) || /Yrkesintro\./i.test(line) || /Introduktionsprogrammet/i.test(line);
 
-    function fixCommonSplits(s){
-      return s
-        .replace(/\u00AD/g,'')       // mjukt bindestreck
-        .replace(/\boc h\b/gi,'och') // “oc h” -> “och”
-        .replace(/\s-\s+/g,' - ')
-        .replace(/\s{2,}/g,' ')
-        .trim();
-    }
+    const fixCommonSplits = (s) =>
+      s.replace(/\u00AD/g,'').replace(/\boc h\b/gi,'och').replace(/\s-\s+/g,' - ').replace(/\s{2,}/g,' ').trim();
 
-    function stripLeadingCodes(s){
-      // Ta bort ledande siffror/koder som “läckt in” från tabellkolumner
-      return s.replace(/^(?:\d+\s+){0,5}(?:[A-ZÅÄÖ]{1,5}\s+){0,3}(?:\d+\s+){0,3}/,'').trim();
-    }
+    const stripLeadingCodes = (s) =>
+      s.replace(/^(?:\d+\s+){0,5}(?:[A-ZÅÄÖ]{1,5}\s+){0,3}(?:\d+\s+){0,3}/,'').trim();
 
     function extractInriktning(rawLine){
       let line = fixCommonSplits(rawLine);
-
       let m =
         line.match(/([A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9.\-–,()/: ]*progr\.?[^\d]*)$/i) ||
         line.match(/(Yrkesintro\.[A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9.\-–,()/: ]*)$/i)   ||
@@ -102,20 +94,17 @@
         const m2 = line.match(/(?:[A-ZÅÄÖ]{1,3}\s*\d{1,3})\s*([A-Za-zÅÄÖåäöÉéÜüÏïÖö.\-–,()/: ]+)$/);
         if(m2) inr = norm(m2[1]);
       }
-      if(!inr){
-        if(likelyProgramLine(line)) inr = line;
-      }
+      if(!inr && likelyProgramLine(line)) inr = line;
       if(!inr) return null;
 
-      inr = stripLeadingCodes(inr);
-      inr = inr.replace(/programmet/gi,'progr.')
-               .replace(/progr\s*\./gi,'progr.')
-               .replace(/\s{2,}/g,' ')
-               .trim();
-      inr = inr.replace(/\bmot\b/gi,'mot')
-               .replace(/\s-\s/g,' - ')
-               .replace(/\s,/,',')
-               .trim();
+      inr = stripLeadingCodes(inr)
+        .replace(/programmet/gi,'progr.')
+        .replace(/progr\s*\./gi,'progr.')
+        .replace(/\s{2,}/g,' ')
+        .replace(/\bmot\b/gi,'mot')
+        .replace(/\s-\s/g,' - ')
+        .replace(/\s,/,',')
+        .trim();
       return inr;
     }
 
@@ -124,21 +113,25 @@
                         .map(m => parseFloat(m[0].replace(',','.')))
                         .filter(v => !Number.isNaN(v));
       if(!nums.length) return null;
-
       const candidates = nums.filter(v => v >= 0 && v <= 340);
       const pool = candidates.length ? candidates : nums;
       const min = Math.min(...pool);
-      if(min === 0) return 0;
-      return Math.round(min*100)/100;
+      return min === 0 ? 0 : Math.round(min*100)/100;
     }
 
-    async function parsePdf(url){
-      const loadingTask = pdfjsLib.getDocument({ url }); // ESM API
-      const pdf = await loadingTask.promise;
+    async function parsePdfFromUrl(url){
+      const loadingTask = pdfjsLib.getDocument({ url });   // kräver CORS
+      return parseCommon(await loadingTask.promise);
+    }
 
+    async function parsePdfFromArrayBuffer(buf){
+      const loadingTask = pdfjsLib.getDocument({ data: buf }); // ingen CORS
+      return parseCommon(await loadingTask.promise);
+    }
+
+    async function parseCommon(pdf){
       let currentSchool = null;
       const out = [];
-
       for(let p=1; p<=pdf.numPages; p++){
         const page = await pdf.getPage(p);
         const textContent = await page.getTextContent();
@@ -166,37 +159,52 @@
       return out;
     }
 
-    // (valfritt) stöd för ?pdf=URL i adressfältet
-    const params = new URLSearchParams(location.search);
-    if(params.has('pdf')) {
-      document.getElementById('pdfUrl').value = params.get('pdf');
+    function renderRows(rows){
+      tbody.innerHTML = '';
+      rows.sort((a,b)=> (a[0]===b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
+      for(const [skola,inr,lag] of rows){
+        const tr = document.createElement('tr');
+        const td1 = document.createElement('td'); td1.textContent = skola; tr.appendChild(td1);
+        const td2 = document.createElement('td'); td2.textContent = inr;   tr.appendChild(td2);
+        const td3 = document.createElement('td'); td3.textContent = (typeof lag==='number' ? lag.toString() : lag); tr.appendChild(td3);
+        tbody.appendChild(tr);
+      }
+      outTable.hidden = false;
+      statusEl.textContent = `Klar — ${rows.length} rader`;
     }
 
-    document.getElementById('parseBtn').addEventListener('click', async () => {
+    document.getElementById('parseUrlBtn').addEventListener('click', async () => {
       const url = document.getElementById('pdfUrl').value.trim();
       if(!url){ alert('Klistra in en direktlänk till PDF:en först.'); return; }
-
-      statusEl.textContent = 'Läser PDF…';
+      statusEl.textContent = 'Läser PDF (URL)…';
       outTable.hidden = true;
-      tbody.innerHTML = '';
-
       try{
-        const rows = await parsePdf(url);
-        rows.sort((a,b)=> (a[0]===b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
-        for(const [skola,inr,lag] of rows){
-          const tr = document.createElement('tr');
-          const td1 = document.createElement('td'); td1.textContent = skola; tr.appendChild(td1);
-          const td2 = document.createElement('td'); td2.textContent = inr;   tr.appendChild(td2);
-          const td3 = document.createElement('td'); td3.textContent = (typeof lag==='number' ? lag.toString() : lag); tr.appendChild(td3);
-          tbody.appendChild(tr);
-        }
-        outTable.hidden = false;
-        statusEl.textContent = `Klar — ${rows.length} rader`;
+        const rows = await parsePdfFromUrl(url);
+        renderRows(rows);
       }catch(err){
         console.error(err);
-        statusEl.textContent = 'Fel vid parsning: ' + err.message;
+        statusEl.textContent = 'Fel vid parsning (URL): ' + err.message + ' — troligen CORS. Testa fil-fliken nedan eller ladda upp PDF i samma repo.';
       }
     });
+
+    document.getElementById('parseFileBtn').addEventListener('click', async () => {
+      const f = document.getElementById('pdfFile').files[0];
+      if(!f){ alert('Välj en PDF-fil först.'); return; }
+      statusEl.textContent = 'Läser PDF (fil)…';
+      outTable.hidden = true;
+      try{
+        const buf = await f.arrayBuffer();
+        const rows = await parsePdfFromArrayBuffer(buf);
+        renderRows(rows);
+      }catch(err){
+        console.error(err);
+        statusEl.textContent = 'Fel vid parsning (fil): ' + err.message;
+      }
+    });
+
+    // Valfritt: auto-fyll via ?pdf=
+    const params = new URLSearchParams(location.search);
+    if(params.has('pdf')) document.getElementById('pdfUrl').value = params.get('pdf');
   </script>
 </body>
 </html>
