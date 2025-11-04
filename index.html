@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Slutlig antagning – parser (filuppladdning)</title>
+  <link rel="icon" href="data:," />
   <style>
     :root{ --bg:#0b0f14; --fg:#e7effa; --muted:#94a3b8; --panel:#0f172a; --accent:#22c55e; --border:#1f2937; }
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
@@ -51,7 +52,6 @@
   </main>
 
   <script type="module">
-    // Anpassa sökvägar om din struktur skiljer sig:
     import * as pdfjsLib from './vendor/pdfjs/pdf.mjs';
     const worker = new Worker('./vendor/pdfjs/pdf.worker.mjs', { type: 'module' });
     pdfjsLib.GlobalWorkerOptions.workerPort = worker;
@@ -62,11 +62,10 @@
     const debugEl = document.getElementById('debugLines');
     const exportCsvBtn = document.getElementById('exportCsvBtn');
 
-    const MARKER_ANY = 'Slutlig antagningsstatistik'; // “för” kan ligga på annan rad
+    const MARKER_ANY = 'Slutlig antagningsstatistik';
     const NORM_RE = /\s+/g;
     const norm = s => (s||'').replace(NORM_RE,' ').trim();
 
-    // Bygg rader av pdf.js text-items via y/x-gruppering
     function itemsToLines(items){
       const rows = new Map();
       const yQuant = 2;
@@ -86,28 +85,21 @@
       return lines;
     }
 
-    // Heuristik: skolnamn (ta text före markören)
     function detectSchool(line){
       if(line.includes(MARKER_ANY)){
         const before = line.split(MARKER_ANY)[0].trim();
         const cleaned = before.replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö \-\.]/g,'').trim();
         if(cleaned) return cleaned;
       }
-      // undanta generella rubriker
       if (/Kommunala gymnasieskolor/i.test(line)) return null;
-      // fallback: rena namn som slutar på skolan/gymnasiet
       if(/(skolan|gymnasiet|gymnasium)\.?$/i.test(line) && !/\d/.test(line) && line.length <= 60){
         return line.trim();
       }
       return null;
     }
 
-    // Programrad → { program, lagsta } eller null
-    // Radens högra del slutar med programnamn (…progr. / programmet / Yrkesintro. mot …),
-    // radens vänstra del innehåller flera tal där det ANDRA är "Lägsta".
-    const programTailRe =
-      /(Programinriktat val mot .*?|Yrkesintro\.\s*mot .*?|[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+?progr\.(?:\s*-\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+)?
-      )(?!.*\bprogr\.)/i;
+    // FIXAD: enradig regex + tillåter “- Transport”-suffix
+    const programTailRe = /(Programinriktat val mot .*?|Yrkesintro\.\s*mot .*?|[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+?progr\.(?:\s*-\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+)?)$/i;
 
     function parseProgramRow(line){
       const m = line.match(programTailRe);
@@ -119,8 +111,8 @@
       const left = line.slice(0, m.index).trim();
       const nums = Array.from(left.matchAll(/\b\d{1,3}(?:[.,]\d+)?\b/g))
                         .map(x => parseFloat(x[0].replace(',','.')));
-      if(nums.length < 2) return null; // behöver minst två tal för att kunna ta "Lägsta"
-      const lagsta = nums[1]; // enligt layout: andra numret = Lägsta jämförelsetal
+      if(nums.length < 2) return null;
+      const lagsta = nums[1]; // andra numret = Lägsta
       return { program, lagsta };
     }
 
@@ -212,7 +204,7 @@
       }
     });
 
-    // Dämpa pdf.js-varningar om TT-funktioner (failsafe)
+    // Tysta pdf.js-varningar (failsafe)
     try {
       if (pdfjsLib.VerbosityLevel) {
         pdfjsLib.GlobalWorkerOptions.verbosity = pdfjsLib.VerbosityLevel.ERROR;
