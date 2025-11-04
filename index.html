@@ -3,11 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Utdrag: Slutlig antagning – Örebro län</title>
+  <title>Utdrag: Slutlig antagning – Örebro län (ESM)</title>
   <style>
-    :root{
-      --bg:#0b0f14;--fg:#e7effa;--muted:#94a3b8;--panel:#0f172a;--accent:#22c55e;--border:#1f2937;
-    }
+    :root{ --bg:#0b0f14; --fg:#e7effa; --muted:#94a3b8; --panel:#0f172a; --accent:#22c55e; --border:#1f2937; }
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
     header{padding:16px 20px;background:#0f172a;position:sticky;top:0;z-index:10;border-bottom:1px solid var(--border)}
     main{max-width:1100px;margin:0 auto;padding:20px}
@@ -22,9 +20,6 @@
     .muted{color:var(--muted)}
     .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#111827;border:1px solid var(--border);font-size:12px}
   </style>
-
-  <!-- Self-hosted pdf.js (lägg dessa filer i din repo under vendor/pdfjs/) -->
-  <script src="vendor/pdfjs/pdf.min.js" defer></script>
 </head>
 <body>
   <header>
@@ -47,170 +42,160 @@
     <p id="note" class="muted">Tips: Om något ser fel ut, säg till så finjusterar jag reglerna (PDF-textlager kan vara luriga).</p>
   </main>
 
-  <script>
-    document.addEventListener('DOMContentLoaded', async () => {
-      const statusEl = document.getElementById('status');
-      const outTable = document.getElementById('outTable');
-      const tbody = outTable.querySelector('tbody');
-      const parseBtn = document.getElementById('parseBtn');
+  <!-- All logik som ESM (importerar pdf.mjs och startar worker som module) -->
+  <script type="module">
+    import * as pdfjsLib from './vendor/pdfjs/pdf.mjs';         // <- ändra sökväg vid behov
 
-      if (typeof window.pdfjsLib === 'undefined') {
-        statusEl.textContent = 'Kunde inte ladda pdf.js (self-hosted). Kontrollera sökvägen vendor/pdfjs/pdf.min.js';
-        parseBtn.disabled = true;
-        return;
+    // Starta worker som ESM och koppla in i pdf.js
+    const worker = new Worker('./vendor/pdfjs/pdf.worker.mjs', { type: 'module' });
+    pdfjsLib.GlobalWorkerOptions.workerPort = worker;
+
+    // ---------- UI ----------
+    const statusEl = document.getElementById('status');
+    const outTable = document.getElementById('outTable');
+    const tbody = outTable.querySelector('tbody');
+    const parseBtn = document.getElementById('parseBtn');
+
+    const MARKER = 'Slutlig antagningsstatistik för';
+    const NORM_RE = /\s+/g;
+
+    const norm = s => (s||'').replace(NORM_RE,' ').trim();
+
+    function extractSchool(line){
+      if(line.includes(MARKER)){
+        const before = line.split(MARKER)[0].trim();
+        const clean = before.replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö \-\.]/g,'');
+        if(clean) return clean.trim();
       }
+      return null;
+    }
 
-      // Worker: peka på din lokala worker-fil (self-hosted)
-      try {
-        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdfjs/pdf.worker.min.js';
-      } catch(e) {
-        console.warn('Kunde inte sätta workerSrc:', e);
+    function likelyProgramLine(line){
+      return /progr/i.test(line) || /programmet/i.test(line) || /Yrkesintro\./i.test(line) || /Introduktionsprogrammet/i.test(line);
+    }
+
+    function fixCommonSplits(s){
+      return s
+        .replace(/\u00AD/g,'')       // mjukt bindestreck
+        .replace(/\boc h\b/gi,'och') // “oc h” -> “och”
+        .replace(/\s-\s+/g,' - ')
+        .replace(/\s{2,}/g,' ')
+        .trim();
+    }
+
+    function stripLeadingCodes(s){
+      // Ta bort ledande siffror/koder som “läckt in” från tabellkolumner
+      return s.replace(/^(?:\d+\s+){0,5}(?:[A-ZÅÄÖ]{1,5}\s+){0,3}(?:\d+\s+){0,3}/,'').trim();
+    }
+
+    function extractInriktning(rawLine){
+      let line = fixCommonSplits(rawLine);
+
+      let m =
+        line.match(/([A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9.\-–,()/: ]*progr\.?[^\d]*)$/i) ||
+        line.match(/(Yrkesintro\.[A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9.\-–,()/: ]*)$/i)   ||
+        line.match(/(Introduktionsprogrammet[A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9.\-–,()/: ]*)$/i);
+
+      let inr = m ? norm(m[1]) : null;
+
+      if(!inr){
+        const m2 = line.match(/(?:[A-ZÅÄÖ]{1,3}\s*\d{1,3})\s*([A-Za-zÅÄÖåäöÉéÜüÏïÖö.\-–,()/: ]+)$/);
+        if(m2) inr = norm(m2[1]);
       }
-
-      // -------- Parsningslogik --------
-      const MARKER = 'Slutlig antagningsstatistik för';
-      const NORM_RE = /\s+/g;
-
-      function norm(s){ return (s||'').replace(NORM_RE,' ').trim(); }
-
-      function extractSchool(line){
-        if(line.includes(MARKER)){
-          const before = line.split(MARKER)[0].trim();
-          const clean = before.replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö \-\.]/g,'');
-          if(clean) return clean.trim();
-        }
-        return null;
+      if(!inr){
+        if(likelyProgramLine(line)) inr = line;
       }
+      if(!inr) return null;
 
-      function likelyProgramLine(line){
-        return /progr/i.test(line) || /programmet/i.test(line) || /Yrkesintro\./i.test(line) || /Introduktionsprogrammet/i.test(line);
-      }
+      inr = stripLeadingCodes(inr);
+      inr = inr.replace(/programmet/gi,'progr.')
+               .replace(/progr\s*\./gi,'progr.')
+               .replace(/\s{2,}/g,' ')
+               .trim();
+      inr = inr.replace(/\bmot\b/gi,'mot')
+               .replace(/\s-\s/g,' - ')
+               .replace(/\s,/,',')
+               .trim();
+      return inr;
+    }
 
-      function fixCommonSplits(s){
-        return s
-          .replace(/\u00AD/g,'')       // mjukt bindestreck
-          .replace(/\boc h\b/gi,'och') // spjälkningar
-          .replace(/\s-\s+/g,' - ')
-          .replace(/\s{2,}/g,' ')
-          .trim();
-      }
+    function extractLagsta(line){
+      const nums = Array.from(line.matchAll(/\b\d{1,3}(?:[.,]\d+)?\b/g))
+                        .map(m => parseFloat(m[0].replace(',','.')))
+                        .filter(v => !Number.isNaN(v));
+      if(!nums.length) return null;
 
-      function stripLeadingCodes(s){
-        // Ta bort ledande siffror/koder (kolumnspill):
-        return s.replace(/^(?:\d+\s+){0,5}(?:[A-ZÅÄÖ]{1,5}\s+){0,3}(?:\d+\s+){0,3}/,'').trim();
-      }
+      const candidates = nums.filter(v => v >= 0 && v <= 340);
+      const pool = candidates.length ? candidates : nums;
+      const min = Math.min(...pool);
+      if(min === 0) return 0;
+      return Math.round(min*100)/100;
+    }
 
-      function extractInriktning(rawLine){
-        let line = fixCommonSplits(rawLine);
+    async function parsePdf(url){
+      const loadingTask = pdfjsLib.getDocument({ url }); // ESM API
+      const pdf = await loadingTask.promise;
 
-        let m =
-          line.match(/([A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9\.\-–,()/: ]*progr\.?[^\d]*)$/i) ||
-          line.match(/(Yrkesintro\.[A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9\.\-–,()/: ]*)$/i)   ||
-          line.match(/(Introduktionsprogrammet[A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9\.\-–,()/: ]*)$/i);
+      let currentSchool = null;
+      const out = [];
 
-        let inr = m ? norm(m[1]) : null;
+      for(let p=1; p<=pdf.numPages; p++){
+        const page = await pdf.getPage(p);
+        const textContent = await page.getTextContent();
+        const lines = textContent.items
+          .map(it => it.str)
+          .join('\n')
+          .split(/\n+/)
+          .map(norm)
+          .filter(Boolean);
 
-        if(!inr){
-          const m2 = line.match(/(?:[A-ZÅÄÖ]{1,3}\s*\d{1,3})\s*([A-Za-zÅÄÖåäöÉéÜüÏïÖö\.\-–,()/: ]+)$/);
-          if(m2) inr = norm(m2[1]);
-        }
+        for(const line of lines){
+          const s = extractSchool(line);
+          if(s){ currentSchool = s; continue; }
+          if(!currentSchool) continue;
 
-        if(!inr){
-          if(likelyProgramLine(line)) inr = line;
-        }
-
-        if(!inr) return null;
-
-        inr = stripLeadingCodes(inr);
-
-        inr = inr
-          .replace(/programmet/gi,'progr.')
-          .replace(/progr\s*\./gi,'progr.')
-          .replace(/\s{2,}/g,' ')
-          .trim();
-
-        inr = inr
-          .replace(/\bmot\b/gi,'mot')
-          .replace(/\s-\s/g,' - ')
-          .replace(/\s,/,',')
-          .trim();
-
-        return inr;
-      }
-
-      function extractLagsta(line){
-        const nums = Array.from(line.matchAll(/\b\d{1,3}(?:[.,]\d+)?\b/g))
-                          .map(m => parseFloat(m[0].replace(',','.')))
-                          .filter(v => !Number.isNaN(v));
-        if(!nums.length) return null;
-
-        const candidates = nums.filter(v => v >= 0 && v <= 340);
-        const pool = candidates.length ? candidates : nums;
-        const min = Math.min(...pool);
-        if(min === 0) return 0;
-
-        return Math.round(min*100)/100;
-      }
-
-      async function parsePdf(url){
-        const pdf = await window.pdfjsLib.getDocument({ url }).promise;
-        let currentSchool = null;
-        const out = [];
-
-        for(let p=1; p<=pdf.numPages; p++){
-          const page = await pdf.getPage(p);
-          const textContent = await page.getTextContent();
-          const lines = textContent.items
-            .map(it => it.str)
-            .join('\n')
-            .split(/\n+/)
-            .map(norm)
-            .filter(Boolean);
-
-          for(const line of lines){
-            const s = extractSchool(line);
-            if(s) { currentSchool = s; continue; }
-            if(!currentSchool) continue;
-
-            if(likelyProgramLine(line)){
-              const inr = extractInriktning(line);
-              const lag = extractLagsta(line);
-              if(currentSchool && inr && lag !== null){
-                out.push([currentSchool, inr, lag]);
-              }
+          if(likelyProgramLine(line)){
+            const inr = extractInriktning(line);
+            const lag = extractLagsta(line);
+            if(currentSchool && inr && lag !== null){
+              out.push([currentSchool, inr, lag]);
             }
           }
         }
-        return out;
       }
+      return out;
+    }
 
-      parseBtn.addEventListener('click', async () => {
-        const url = document.getElementById('pdfUrl').value.trim();
-        if(!url){ alert('Klistra in en direktlänk till PDF:en först.'); return; }
+    // (valfritt) stöd för ?pdf=URL i adressfältet
+    const params = new URLSearchParams(location.search);
+    if(params.has('pdf')) {
+      document.getElementById('pdfUrl').value = params.get('pdf');
+    }
 
-        statusEl.textContent = 'Läser PDF…';
-        outTable.hidden = true;
-        tbody.innerHTML = '';
+    document.getElementById('parseBtn').addEventListener('click', async () => {
+      const url = document.getElementById('pdfUrl').value.trim();
+      if(!url){ alert('Klistra in en direktlänk till PDF:en först.'); return; }
 
-        try{
-          const rows = await parsePdf(url);
-          rows.sort((a,b)=> (a[0]===b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
+      statusEl.textContent = 'Läser PDF…';
+      outTable.hidden = true;
+      tbody.innerHTML = '';
 
-          for(const [skola,inr,lag] of rows){
-            const tr = document.createElement('tr');
-            const td1 = document.createElement('td'); td1.textContent = skola; tr.appendChild(td1);
-            const td2 = document.createElement('td'); td2.textContent = inr;   tr.appendChild(td2);
-            const td3 = document.createElement('td'); td3.textContent = (typeof lag==='number' ? lag.toString() : lag); tr.appendChild(td3);
-            tbody.appendChild(tr);
-          }
-
-          outTable.hidden = false;
-          statusEl.textContent = `Klar — ${rows.length} rader`;
-        }catch(err){
-          console.error(err);
-          statusEl.textContent = 'Fel vid parsning: ' + err.message;
+      try{
+        const rows = await parsePdf(url);
+        rows.sort((a,b)=> (a[0]===b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
+        for(const [skola,inr,lag] of rows){
+          const tr = document.createElement('tr');
+          const td1 = document.createElement('td'); td1.textContent = skola; tr.appendChild(td1);
+          const td2 = document.createElement('td'); td2.textContent = inr;   tr.appendChild(td2);
+          const td3 = document.createElement('td'); td3.textContent = (typeof lag==='number' ? lag.toString() : lag); tr.appendChild(td3);
+          tbody.appendChild(tr);
         }
-      });
+        outTable.hidden = false;
+        statusEl.textContent = `Klar — ${rows.length} rader`;
+      }catch(err){
+        console.error(err);
+        statusEl.textContent = 'Fel vid parsning: ' + err.message;
+      }
     });
   </script>
 </body>
