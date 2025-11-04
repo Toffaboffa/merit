@@ -46,7 +46,7 @@
     </table>
 
     <details>
-      <summary>Visa debug (första ~120 byggda rader)</summary>
+      <summary>Visa debug (första ~150 byggda rader)</summary>
       <pre id="debugLines"></pre>
     </details>
   </main>
@@ -63,8 +63,11 @@
     const exportCsvBtn = document.getElementById('exportCsvBtn');
 
     const MARKER_ANY = 'Slutlig antagningsstatistik';
-    const NORM_RE = /\s+/g;
-    const norm = s => (s||'').replace(NORM_RE,' ').trim();
+    const STUDIEVAG = 'Studieväg';
+    const LOWEST_HDR = 'Lägsta jämförelsetal';
+
+    const norm = s => (s||'').replace(/\s+/g,' ').trim();
+    const isMostlyNumbers = s => /^(\d|[.,]|\s)+$/.test((s||'').trim());
 
     function itemsToLines(items){
       const rows = new Map();
@@ -85,35 +88,64 @@
       return lines;
     }
 
+    // Skolnamn: (1) “<Skola> Slutlig antagningsstatistik …”, (2) fristående skolrad (Alléskolan)
     function detectSchool(line){
       if(line.includes(MARKER_ANY)){
         const before = line.split(MARKER_ANY)[0].trim();
         const cleaned = before.replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö \-\.]/g,'').trim();
         if(cleaned) return cleaned;
       }
-      if (/Kommunala gymnasieskolor/i.test(line)) return null;
+      if(/Kommunala gymnasieskolor/i.test(line)) return null;
       if(/(skolan|gymnasiet|gymnasium)\.?$/i.test(line) && !/\d/.test(line) && line.length <= 60){
         return line.trim();
       }
       return null;
     }
 
-    // FIXAD: enradig regex + tillåter “- Transport”-suffix
-    const programTailRe = /(Programinriktat val mot .*?|Yrkesintro\.\s*mot .*?|[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+?progr\.(?:\s*-\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+)?)$/i;
+    // Rensa PDF-artefakter (delade ord som “oc h”)
+    function fixSplits(s){
+      return (s||'').replace(/\u00AD/g,'')
+                     .replace(/\boc h\b/gi,'och')
+                     .replace(/\s-\s+/g,' - ')
+                     .replace(/\s{2,}/g,' ')
+                     .trim();
+    }
 
-    function parseProgramRow(line){
-      const m = line.match(programTailRe);
-      if(!m) return null;
-      const program = m[0]
-        .replace(/programmet/gi,'progr.')
-        .replace(/\s{2,}/g,' ')
-        .trim();
-      const left = line.slice(0, m.index).trim();
-      const nums = Array.from(left.matchAll(/\b\d{1,3}(?:[.,]\d+)?\b/g))
-                        .map(x => parseFloat(x[0].replace(',','.')));
-      if(nums.length < 2) return null;
-      const lagsta = nums[1]; // andra numret = Lägsta
-      return { program, lagsta };
+    // Dela ut alla program från ett sammanslaget Studieväg-block
+    function extractProgramsFromStudievag(text){
+      const t = fixSplits(text);
+      const hits = [];
+      const re = new RegExp([
+        '(Programinriktat val mot [A-Za-zÅÄÖåäöÉéÜüÏïÖö\\- och\\.]+?progr(?:\\.-\\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\\- ]+)?\\.)',
+        '(Yrkesintro\\.\\s*mot [A-Za-zÅÄÖåäöÉéÜüÏïÖö\\- och\\.]+?progr(?:\\.-\\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\\- ]+)?\\.)',
+        '([A-ZÅÄÖa-zåäöÉéÜüÏïÖö\\- ]+?progr\\.)'
+      ].join('|'),'g');
+      let m;
+      while((m = re.exec(t)) !== null){
+        const raw = (m[1] || m[2] || m[3] || '').trim();
+        if(!raw) continue;
+        const cleaned = raw.replace(/\bprogrammet\b/i,'progr.')
+                           .replace(/\s{2,}/g,' ')
+                           .trim();
+        if(cleaned.toLowerCase() !== 'stv.' && cleaned.length > 8){
+          hits.push(cleaned);
+        }
+      }
+      return hits;
+    }
+
+    // Samla meritvärden efter “Lägsta jämförelsetal”
+    function collectMerits(lines, startIdx){
+      const vals = [];
+      for(let i=startIdx+1; i<lines.length; i++){
+        const L = lines[i];
+        if(!isMostlyNumbers(L)) break;
+        const nums = Array.from(L.matchAll(/\b\d{1,3}(?:[.,]\d+)?\b/g))
+                          .map(m => parseFloat(m[0].replace(',','.')))
+                          .filter(v => v>=0 && v<=340);
+        vals.push(...nums);
+      }
+      return vals;
     }
 
     async function parsePdfFromArrayBuffer(buf){
@@ -121,8 +153,22 @@
       const pdf = await loadingTask.promise;
 
       let currentSchool = null;
+      let pendingSchool = null;
+      let programs = [];
+      let merits = [];
       const out = [];
       const debugLines = [];
+
+      function flush(){
+        if(currentSchool){
+          const n = Math.min(programs.length, merits.length);
+          for(let i=0;i<n;i++){
+            out.push([currentSchool, programs[i], merits[i]]);
+          }
+        }
+        programs = [];
+        merits = [];
+      }
 
       for(let p=1; p<=pdf.numPages; p++){
         const page = await pdf.getPage(p);
@@ -130,21 +176,50 @@
         const lines = itemsToLines(textContent.items);
 
         for(const L of lines){
-          if(debugLines.length < 120) debugLines.push(L);
+          if(debugLines.length < 150) debugLines.push(L);
         }
 
-        for(const line of lines){
-          const sch = detectSchool(line);
-          if(sch) { currentSchool = sch; continue; }
+        for(let i=0;i<lines.length;i++){
+          const raw = lines[i];
+          const line = norm(raw);
 
-          if(/progr|programmet|Yrkesintro\./i.test(line)){
-            const hit = parseProgramRow(line);
-            if(hit && currentSchool){
-              out.push([currentSchool, hit.program, hit.lagsta]);
+          // Upptäck skolnamn
+          const maybe = detectSchool(line);
+          if(maybe){
+            // Om vi redan har samlat data för föregående skola → flush
+            if(currentSchool && (programs.length || merits.length)) flush();
+            pendingSchool = maybe; // sätt temporärt (aktualiseras när vi ser MARKER_ANY)
+          }
+          if(line.includes(MARKER_ANY)){
+            // Bekräfta skolnamn (hanterar fallet där skolan står på raden ovan)
+            currentSchool = pendingSchool || currentSchool;
+          }
+
+          // Studieväg-blocket: samla programtext
+          if(line.startsWith(STUDIEVAG)){
+            let block = '';
+            for(let j=i+1; j<lines.length; j++){
+              const L = lines[j];
+              if(/Antal|Medianvärde|Lägsta jämförelsetal|Sydnärkes|Studieväg|Slutlig antagningsstatistik/i.test(L)) break;
+              if(isMostlyNumbers(L)) break;
+              if(/progr|Yrkesintro|Programinriktat val/i.test(L) || / [A-ZÅÄÖ].+progr\./.test(L)){
+                block += ' ' + L;
+              }
             }
+            const extracted = extractProgramsFromStudievag(block);
+            if(extracted.length) programs.push(...extracted);
+          }
+
+          // Merit-blocket
+          if(line.startsWith(LOWEST_HDR)){
+            const vals = collectMerits(lines, i);
+            if(vals.length) merits.push(...vals);
           }
         }
       }
+      // Sista skolan
+      if(currentSchool && (programs.length || merits.length)) flush();
+
       debugEl.textContent = debugLines.join('\n');
       return out;
     }
@@ -156,7 +231,7 @@
         const tr = document.createElement('tr');
         const td1 = document.createElement('td'); td1.textContent = skola; tr.appendChild(td1);
         const td2 = document.createElement('td'); td2.textContent = inr;   tr.appendChild(td2);
-        const td3 = document.createElement('td'); td3.textContent = (typeof lag==='number' ? lag.toString() : lag); tr.appendChild(td3);
+        const td3 = document.createElement('td'); td3.textContent = (typeof lag==='number' ? String(lag).replace('.',',') : lag); tr.appendChild(td3);
         tbody.appendChild(tr);
       }
       outTable.hidden = false;
