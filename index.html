@@ -20,7 +20,7 @@
     tr:hover td{background:#0c1222}
     .muted{color:var(--muted)}
     details{margin-top:14px}
-    pre{white-space:pre-wrap;font-size:12px;background:#0f172a;border:1px solid var(--border);padding:10px;border-radius:8px;max-height:360px;overflow:auto}
+    pre{white-space:pre-wrap;font-size:12px;background:#0f172a;border:1px solid var(--border);padding:10px;border-radius:8px;max-height:420px;overflow:auto}
     .toolbar{display:flex;gap:8px;margin-top:10px}
     .pill{display:inline-flex;gap:6px;align-items:center;background:#0d1326;border:1px solid #1f2937;border-radius:999px;padding:4px 10px;font-size:12px}
   </style>
@@ -47,13 +47,12 @@
     </table>
 
     <details>
-      <summary>Visa debug (första ~400 rader + träffad kolumnordning per block)</summary>
+      <summary>Visa debug (block för block)</summary>
       <pre id="debugLines"></pre>
     </details>
   </main>
 
   <script type="module">
-    // === pdf.js setup ===
     import * as pdfjsLib from './vendor/pdfjs/pdf.mjs';
     const worker = new Worker('./vendor/pdfjs/pdf.worker.mjs', { type: 'module' });
     pdfjsLib.GlobalWorkerOptions.workerPort = worker;
@@ -64,187 +63,218 @@
     const debugEl = document.getElementById('debugLines');
     const exportCsvBtn = document.getElementById('exportCsvBtn');
 
-    // === helpers ===
-    const normSpace = s => (s||'').replace(/\s+/g,' ').trim();
-    const stripDots = s => s.replace(/[·•]/g,'-');
-    const canon = s => normSpace(stripDots(s))
+    const norm = s => (s||'').replace(/\s+/g,' ').trim();
+    const canon = s => norm(s)
       .toLowerCase()
       .replace(/å/g,'a').replace(/ä/g,'a').replace(/ö/g,'o')
-      .replace(/–|—/g,'-')
-      .replace(/\./g,'')
-      .replace(/\s*-\s*/g,'-')
-      .replace(/\s+/g,' ');
+      .replace(/[–—]/g,'-')
+      .replace(/\./g,'');
 
-    // Matcha skolnamn
-    function detectSchool(line){
-      const clean = normSpace(line);
-      // Vanlig rubrikrad
-      const m = clean.match(/^Slutlig antagningsstatistik for\s+(.+?)$/i);
-      if (m) return m[1].trim();
-      // Fristående rad med skolnamn (Alléskolan, Lindeskolan, …)
-      if (/(skolan|gymnasiet|gymnasium)\.?$/i.test(clean) && !/\d/.test(clean)) return clean;
-      return null;
+    const NUM_RE = /(?<!\d)\d{1,3}(?:[.,]\d+)?(?!\d)/g;
+    const getNums = s => Array.from((s||'').matchAll(NUM_RE)).map(m=>parseFloat(m[0].replace(',','.')));
+
+    // Bygg rader från pdf.js-items
+    function buildLines(items){
+      const rowsByY = new Map();
+      const yq = 2;
+      for(const it of items){
+        const y = it.transform[5], x = it.transform[4];
+        const key = Math.round(y/yq)*yq;
+        if(!rowsByY.has(key)) rowsByY.set(key, []);
+        rowsByY.get(key).push({x,str: it.str||''});
+      }
+      const ys = Array.from(rowsByY.keys()).sort((a,b)=> b-a);
+      const lines = [];
+      for(const y of ys){
+        const bits = rowsByY.get(y).sort((a,b)=> a.x-b.x).map(b=>b.str);
+        let line = norm(bits.join(' '));
+        if(!line) continue;
+        // laga vanliga avstavningar i rubriker
+        line = line
+          .replace(/forsta-\s*handssokande/gi,'första-handssökande')
+          .replace(/Lagsta\s+jamforelsetal/gi,'Lägsta jämförelsetal')
+          .replace(/Studievag/gi,'Studieväg')
+          .replace(/Medianvarde/gi,'Medianvärde');
+        lines.push(line);
+      }
+      return lines;
     }
 
-    // Matcha “kolumnhuvudraden” – vi läser ordningen efter "Studieväg"
-    const headerTokens = [
-      'antal platser',
-      'antal forsta-handssokande', // vi kan få avstavning i PDF:n
-      'antal forsta handssokande',
-      'antal forsta-handssokande',
-      'antal antagna',
-      'lagsta jamforelsetal',
-      'medianvarde',
-      'antal reserver'
-    ];
-    const headerCanonToKey = {
-      'antal platser':'platser',
-      'antal forsta-handssokande':'forstahand',
-      'antal forsta handssokande':'forstahand',
-      'antal antagna':'antagna',
-      'lagsta jamforelsetal':'lagsta',
-      'medianvarde':'median',
-      'antal reserver':'reserver'
-    };
-
-    function tryParseHeaderOrder(line){
-      // exempelrad: "Antal första- Antal Lägsta Studieväg Antal platser handssökande antagna jämförelsetal Medianvärde Antal reserver"
-      const c = canon(line);
-      if (!c.includes('studievag')) return null;
-
-      // Plocka ut token-sekvens i ordning
-      const order = [];
-      for (const tok of headerTokens){
-        const key = headerCanonToKey[tok];
-        // matcha både med och utan mellanslag/avstavning
-        // vi söker iterativt i texten och "bränner" av från vänster till höger
-        const idx = c.indexOf(tok);
-        if (idx !== -1) order.push(key);
-      }
-      // Behöver åtminstone "lagsta" i listan för att vara användbar
-      if (order.length && order.includes('lagsta')) {
-        // Deduplicera och bevara ordning
-        const seen = new Set();
-        const unique = order.filter(x => (seen.has(x) ? false : (seen.add(x), true)));
-        return unique;
-      }
-      return null;
+    function isSchoolHeader(line){
+      // "Slutlig antagningsstatistik för Alléskolan"
+      return /^Slutlig antagningsstatistik för\s+/i.test(line);
+    }
+    function extractSchoolFromHeader(line){
+      return line.replace(/^Slutlig antagningsstatistik för\s+/i,'').trim();
+    }
+    function looksLikeBareSchoolName(line){
+      return /(skolan|gymnasiet|gymnasium)\.?$/i.test(line) && !/\d/.test(line);
     }
 
-    // Programradsdetektering
-    // täcker: "Programinriktat val mot …", "Yrkesintro. mot …", "...progr.", "...programmet", ev. ämnes-suffikser
-    const progRegex = /(Programinriktat val mot [^]+|Yrkesintro\.\s*mot [^]+|[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+?(?:progr\.|programmet)(?:\s*-\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+)?)/i;
-
-    // Efter programmet kommer ofta en skol-/tabellkod (AE/DEM/LS/KA/RU/…)
-    const codeRegex = /\b[A-ZÅÄÖ]{2,3}\b/;
-
-    // Numeriska värden (sv/eng decimal)
-    const numRe = /(?<!\d)(\d{1,3}(?:[.,]\d+)?)(?!\d)/g;
-    const parseNums = s => {
+    // Program-delare: extrahera en lista från en lång rad
+    function extractProgramsFromText(t){
+      // Fånga: Programinriktat val mot …  |  Yrkesintro. mot …  |  …progr. / …programmet  [valfri " - ..." svans]
+      const RE = /(Programinriktat val mot [^\.]+\.|Yrkesintro\.\s*mot [^\.]+\.|[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+?(?:progr\.|programmet)(?:\s*-\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+)?)/g;
       const out = [];
-      s.replace(numRe, (_,n) => { out.push(parseFloat(n.replace(',','.'))); return _; });
+      let m; 
+      while((m = RE.exec(t)) !== null){
+        const s = norm(m[0].replace(/\bprogrammet\b/i,'progr.'));
+        if(s.length>4) out.push(s);
+      }
       return out;
-    };
+    }
 
-    function splitProgramAndRest(line){
-      const m = line.match(progRegex);
-      if (!m) return null;
-      const program = normSpace(m[0].replace(/\bprogrammet\b/i,'progr.'));
-      const tail = line.slice(m.index + m[0].length).trim();
-      // ta bort ev. kod först i svansen (AE/DEM/…)
-      const tailNoCode = tail.replace(/^\b[A-ZÅÄÖ]{2,3}\b/,'').trim();
-      return { program, tail: tailNoCode };
+    // Läs ett helt "Studieväg"-block: rubriker kan ligga över flera rader,
+    // programlistan är ofta en (eller två) rader, därefter kommer kolumnhinkar med siffror
+    function parseBlock(lines, startIdx, debug, school){
+      const resultRows = [];
+
+      // 1) samla headerfönster runt "Studieväg"
+      const headerWindow = [];
+      for(let i=startIdx; i<Math.min(lines.length, startIdx+12); i++){
+        const L = lines[i];
+        headerWindow.push(L);
+        // bryt när vi når tydligt nästa sektion (ny skola eller ny "Studieväg")
+        if(i>startIdx && (isSchoolHeader(L) || looksLikeBareSchoolName(L) || /^Slutlig antagningsstatistik/i.test(L) || /^Studieväg$/.test(L))){
+          break;
+        }
+      }
+      const headerText = canon(headerWindow.join(' '));
+      // Försök härleda ordningen – vi söker i rätt sekvens och tar första träffordningen
+      const headerKeys = ['antal platser','antal första-handssökande','antal forsta-handssokande','antal antagna','lägsta jämförelsetal','lagsta jamforelsetal','medianvärde','medianvarde','antal reserver'];
+      const keyMap = {
+        'antal platser':'platser',
+        'antal första-handssökande':'forstahand',
+        'antal forsta-handssokande':'forstahand',
+        'antal antagna':'antagna',
+        'lägsta jämförelsetal':'lagsta',
+        'lagsta jamforelsetal':'lagsta',
+        'medianvärde':'median',
+        'medianvarde':'median',
+        'antal reserver':'reserver'
+      };
+      const order = [];
+      for(const k of headerKeys){
+        if(headerText.includes(canon(k))){
+          const key = keyMap[k];
+          if(!order.includes(key)) order.push(key);
+        }
+      }
+      if(!order.includes('lagsta')){
+        debug.push(`  [WARN] Hittade inte rubrikordning med "Lägsta" i blocket – hoppar.`);
+        return { nextIdx: startIdx+1, rows: [] };
+      }
+      debug.push(`  [ORDER] ${order.join(', ')}`);
+
+      // 2) leta programraden (1–3 rader) efter headerfönstret
+      let progText = '';
+      let iProgStart = startIdx+1;
+      for(let i=iProgStart;i<Math.min(lines.length, iProgStart+8); i++){
+        const L = lines[i];
+        if(/Studieväg/i.test(L)) continue;
+        // heuristik: rad som innehåller minst två "progr." eller "Yrkesintro."/ "Programinriktat val"
+        const cnt = (L.match(/progr\./gi)||[]).length + (L.match(/Yrkesintro\./gi)||[]).length + (L.match(/Programinriktat val/gi)||[]).length;
+        if(cnt>=1){ // ibland delas på två rader
+          progText += ' ' + L;
+          // fortsätt en rad till om nästa också ser ut som fortsättning
+          if((lines[i+1]||'').match(/progr\.|Yrkesintro\.|Programinriktat val/i)) {
+            continue;
+          }
+          iProgStart = i+1;
+          break;
+        }
+      }
+      const programs = extractProgramsFromText(progText);
+      if(programs.length === 0){
+        debug.push(`  [WARN] Fann inga program i blocket – hoppar.`);
+        return { nextIdx: startIdx+1, rows: [] };
+      }
+      debug.push(`  [PROGRAM] ${programs.length} st`);
+
+      // 3) samla kolumnhinkar (siffror) i ordning efter header
+      const buckets = { platser:[], forstahand:[], antagna:[], lagsta:[], median:[], reserver:[] };
+      let cursor = iProgStart;
+      // läs framåt tills nästa skola/Studieväg/sektion
+      // vi fyller hinkar i headerordning; varje hink kan spilla över flera rader
+      const stopRe = /^(Slutlig antagningsstatistik|Studieväg|[A-Za-zÅÄÖåäö].*(skolan|gymnasiet|gymnasium)\.?)$/i;
+      for(const key of order){
+        const arr = [];
+        while(cursor < lines.length){
+          const L = lines[cursor];
+          if(stopRe.test(L)) break;
+          const nums = getNums(L);
+          if(nums.length){
+            arr.push(...nums);
+            cursor++;
+            // om vi redan har minst lika många tal som program – gå vidare till nästa hink
+            if(arr.length >= programs.length) break;
+            continue;
+          }
+          // icke-numerisk rad: om den är en kodrad (AE/DEM/… upprepat) – ignorera; annars kan det vara nästa sektion
+          if(/\b([A-ZÅÄÖ]{2,3}\s+){3,}\b/.test(L)){ cursor++; continue; }
+          // annars bryt hink
+          break;
+        }
+        buckets[key] = arr.slice(0, programs.length);
+        debug.push(`  [${key}] ${buckets[key].length} värden`);
+      }
+
+      // 4) bygg rader (bara om vi har minst någon "lagsta")
+      const L = buckets.lagsta || [];
+      const n = Math.min(programs.length, L.length);
+      if(n === 0){
+        debug.push(`  [WARN] 0 Lägsta-värden – hoppar blocket.`);
+      }else{
+        for(let i=0;i<n;i++){
+          resultRows.push([school, programs[i], L[i]]);
+        }
+      }
+
+      // 5) hitta rimligt nextIdx (sluta när vi träffar nästa skola/Studieväg/sektion)
+      let nextIdx = cursor;
+      while(nextIdx < lines.length){
+        if(stopRe.test(lines[nextIdx])) break;
+        nextIdx++;
+      }
+      return { nextIdx, rows: resultRows };
     }
 
     async function parsePdfFromArrayBuffer(buf){
       const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
       const debug = [];
       const rows = [];
-
       let currentSchool = null;
-      let currentOrder = null; // kolumnordning för blocket
 
-      for (let p=1; p<=pdf.numPages; p++){
+      for(let p=1; p<=pdf.numPages; p++){
         const page = await pdf.getPage(p);
-        const textContent = await page.getTextContent();
-        const items = textContent.items;
+        const text = await page.getTextContent();
+        const lines = buildLines(text.items);
 
-        // Bygg läsbara rader i samma ordning som pdf.js ger (vänster→höger, topp→botten)
-        // Vi *måste* vara snälla mot avstavningar: slå ihop “första-” + “handssökande” etc
-        const lines = [];
-        {
-          // gruppera med y-kvantiserare men håll ordningen pdf.js ger
-          const byY = new Map();
-          const yq = 2;
-          for (const it of items){
-            const key = Math.round(it.transform[5]/yq)*yq;
-            if (!byY.has(key)) byY.set(key, []);
-            byY.get(key).push(it);
+        // debug: visa ett axplock från sidan
+        for(const L of lines.slice(0,60)) if (debug.length < 300) debug.push(L);
+
+        for(let i=0; i<lines.length; i++){
+          const line = lines[i];
+
+          if(isSchoolHeader(line)){
+            currentSchool = extractSchoolFromHeader(line);
+            debug.push(`[SKOLA] ${currentSchool}`);
+            continue;
           }
-          const ys = Array.from(byY.keys()).sort((a,b)=> b-a); // uppifrån och ner
-          for (const y of ys){
-            const bits = byY.get(y).sort((a,b)=> a.transform[4]-b.transform[4]).map(it => it.str || '');
-            let line = normSpace(bits.join(' '));
-            if (!line) continue;
-            // fixa vanliga avstavningar i rubrikerna
-            line = line.replace(/forsta-\s*handssokande/gi,'första-handssökande')
-                       .replace(/Lagsta\s+jamforelsetal/gi,'Lägsta jämförelsetal')
-                       .replace(/Studievag/gi,'Studieväg')
-                       .replace(/Medianvarde/gi,'Medianvärde');
-            lines.push(line);
-          }
-        }
-
-        // debug: dumpa ett gäng rader
-        for (const L of lines){
-          if (debug.length < 400) debug.push(L);
-        }
-
-        for (const line of lines){
-          // 1) ny skola?
-          const sch = detectSchool(line);
-          if (sch){
-            currentSchool = sch;
-            // nollställ ordning – nytt block kommer med ny header
-            currentOrder = null;
+          if(looksLikeBareSchoolName(line)){
+            currentSchool = line.trim();
             debug.push(`[SKOLA] ${currentSchool}`);
             continue;
           }
 
-          // 2) kolumnordning?
-          const ord = tryParseHeaderOrder(line);
-          if (ord && ord.length){
-            currentOrder = ord; // t.ex. ["platser","forstahand","antagna","lagsta","median","reserver"]
-            debug.push(`[KOLUMNORdNING] ${JSON.stringify(currentOrder)}`);
-            continue;
-          }
-
-          // 3) programrad?
-          if (!currentSchool || !currentOrder) continue; // kan inte läsa värden utan båda
-
-          const split = splitProgramAndRest(line);
-          if (!split) continue;
-
-          const { program, tail } = split;
-
-          // ta fram siffrorna i rätt ordning
-          const nums = parseNums(tail);
-          if (!nums.length) continue;
-
-          // Mappa efter aktuell kolumnordning
-          const map = {};
-          for (let i=0; i<currentOrder.length && i<nums.length; i++){
-            map[currentOrder[i]] = nums[i];
-          }
-
-          // Vi bryr oss bara om "lagsta"
-          const lagsta = map['lagsta'];
-          if (typeof lagsta === 'number' && !Number.isNaN(lagsta)){
-            rows.push([currentSchool, program, lagsta]);
-            if (debug.length < 400) debug.push(`[RAD] ${currentSchool} | ${program} | Lägsta=${lagsta}`);
-          } else {
-            // ingen Lägsta i denna rad – hoppa
-            if (debug.length < 400) debug.push(`[HOPPAR] ${currentSchool} | ${program} | nums=${nums.join(',')}`);
+          if(/^Studieväg$/i.test(line)){
+            if(!currentSchool){
+              debug.push(`  [WARN] Studieväg utan aktuell skola – hoppar.`);
+              continue;
+            }
+            const { nextIdx, rows: blockRows } = parseBlock(lines, i, debug, currentSchool);
+            rows.push(...blockRows);
+            i = Math.max(i+1, nextIdx-1);
           }
         }
       }
@@ -257,11 +287,11 @@
     function renderRows(rows){
       tbody.innerHTML = '';
       rows.sort((a,b)=> (a[0]===b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
-      for (const [skola,inr,lag] of rows){
+      for(const [skola,inr,lag] of rows){
         const tr = document.createElement('tr');
         const td1 = document.createElement('td'); td1.textContent = skola; tr.appendChild(td1);
         const td2 = document.createElement('td'); td2.textContent = inr;   tr.appendChild(td2);
-        const td3 = document.createElement('td'); td3.textContent = String(lag).replace('.',','); tr.appendChild(td3);
+        const td3 = document.createElement('td'); td3.textContent = (typeof lag==='number'? String(lag).replace('.',',') : String(lag)); tr.appendChild(td3);
         tbody.appendChild(tr);
       }
       outTable.hidden = rows.length === 0;
@@ -297,12 +327,12 @@
       }
     });
 
-    // Minska pdf.js TT-varningar
-    try {
+    // Tysta TT-varningen
+    try{
       if (pdfjsLib.VerbosityLevel) pdfjsLib.GlobalWorkerOptions.verbosity = pdfjsLib.VerbosityLevel.ERROR;
       const o = console.warn;
       console.warn = (...args) => { if (String(args[0]||'').includes('TT: undefined function')) return; o(...args); };
-    } catch {}
+    }catch{}
   </script>
 </body>
 </html>
