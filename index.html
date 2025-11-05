@@ -18,15 +18,24 @@
     button.secondary{background:#172338;color:var(--fg)}
     .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px}
     .cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .cols-3{display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px}
     pre{white-space:pre-wrap;word-break:break-word;margin:0;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,Monaco,monospace}
     .stat{color:var(--accent)}
+    .warn{color:var(--warn)}
+    .bad{color:var(--danger)}
     .muted{color:var(--muted)}
     .badge{display:inline-block;border:1px solid var(--border);border-radius:999px;padding:2px 8px;margin-left:6px;font-size:.8rem;color:var(--muted)}
     .footer{margin-top:10px;color:var(--muted);font-size:.9rem}
     a{color:#8dd2ff}
     input[type="checkbox"]{transform:scale(1.15);margin-right:.4rem}
-    @media (max-width:900px){.cols{grid-template-columns:1fr}}
+    code{background:#0a1220;border:1px solid var(--border);border-radius:6px;padding:2px 6px}
+    .urlbox{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .url{font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,Monaco,monospace;word-break:break-all;color:#bfe0ff}
+    .tiny{font-size:.85rem;color:var(--muted)}
+    @media (max-width:900px){.cols,.cols-3{grid-template-columns:1fr}}
   </style>
+  <!-- supabase-js v2 CDN -->
+  <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -42,8 +51,9 @@
         <button id="btn">Extrahera</button>
         <button id="btnCopy" class="secondary" disabled>Kopiera CSV</button>
         <button id="btnDl" class="secondary" disabled>Ladda ned CSV</button>
-        <label><input type="checkbox" id="keepComma" />Behåll kommatecken som decimal (standard = punkt)</label>
-        <label><input type="checkbox" id="dedupe" checked />Ta bort dubbletter</label>
+        <button id="btnSupabase" class="secondary" disabled>Spara till Supabase</button>
+        <label class="tiny"><input type="checkbox" id="keepComma" />Behåll kommatecken som decimal (standard = punkt)</label>
+        <label class="tiny"><input type="checkbox" id="dedupe" checked />Ta bort dubbletter</label>
       </div>
       <div class="footer">All parsing sker i din webbläsare. Inget skickas någonstans.</div>
     </div>
@@ -63,11 +73,26 @@
       <b>CSV (förhandsvisning)</b>
       <pre id="csv" class="muted">—</pre>
     </div>
+
+    <div class="panel">
+      <b>Supabase</b> <span class="tiny">(laddas upp till bucket <code>antagning</code>)</span>
+      <div class="tiny" style="margin:6px 0 10px">
+        Sheets-tips: använd <code>=IMPORTDATA("…/latest.csv")</code> eller splitta med <code>=SPLIT(IMPORTDATA("…/latest.csv");";")</code> om semikolon inte delas.
+      </div>
+      <div class="urlbox"><span class="tiny">Senaste:</span> <span id="urlLatest" class="url">—</span> <button id="copyLatest" class="secondary" disabled>Kopiera URL</button></div>
+      <div class="urlbox" style="margin-top:6px"><span class="tiny">Version:</span> <span id="urlVersion" class="url">—</span> <button id="copyVersion" class="secondary" disabled>Kopiera URL</button></div>
+      <div id="sbStatus" class="tiny" style="margin-top:8px"></div>
+    </div>
   </div>
 </div>
 
 <script>
-/* ---------- Utils ---------- */
+/* ---------- Supabase init (ANON key only) ---------- */
+const SUPABASE_URL = 'https://cdtnytktmdvptucfmfxr.supabase.co';
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkdG55dGt0bWR2cHR1Y2ZtZnhyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIzNDMyNjMsImV4cCI6MjA3NzkxOTI2M30.V4GvbC102M6KU7ayANDR_EP5nXmaV_CnngC7wgcp8Gs'; // använd INTE service_role i klient!
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+/* ---------- DOM ---------- */
 const ta = document.getElementById('ta');
 const btn = document.getElementById('btn');
 const report = document.getElementById('report');
@@ -75,23 +100,30 @@ const missedPre = document.getElementById('missed');
 const csvPre = document.getElementById('csv');
 const btnCopy = document.getElementById('btnCopy');
 const btnDl = document.getElementById('btnDl');
+const btnSupabase = document.getElementById('btnSupabase');
 const keepComma = document.getElementById('keepComma');
 const dedupe = document.getElementById('dedupe');
+const urlLatestEl = document.getElementById('urlLatest');
+const urlVersionEl = document.getElementById('urlVersion');
+const copyLatestBtn = document.getElementById('copyLatest');
+const copyVersionBtn = document.getElementById('copyVersion');
+const sbStatus = document.getElementById('sbStatus');
 
+/* ---------- Utils ---------- */
 function cleanLine(s){
   return s
-    .replace(/\u00A0/g,' ')     // nbsp
-    .replace(/[ ]{2,}/g,' ')    // multipla spaces
-    .replace(/\s+$/,'')         // trailing whitespace
-    .replace(/^\s+/,'')         // leading whitespace
+    .replace(/\u00A0/g,' ')
+    .replace(/[ ]{2,}/g,' ')
+    .replace(/\s+$/,'')
+    .replace(/^\s+/,'')
     .trim();
 }
 function toCSV(rows, useComma){
   const header = 'Skola;Program;Lägsta_Merit';
   const lines = rows.map(r => {
     let [a,b,c] = r;
-    b = b.replace(/;/g, ',');      // skydda semikolon i programnamn
-    if (!useComma) c = String(c).replace(',', '.'); // decimalseparator
+    b = b.replace(/;/g, ',');
+    if (!useComma) c = String(c).replace(',', '.');
     return `${a};${b};${c}`;
   });
   return [header, ...lines].join('\n');
@@ -106,19 +138,12 @@ function download(filename, text) {
   URL.revokeObjectURL(url);
 }
 
-/* ---------- Parser (multi-block per skola) ---------- */
+/* ---------- Parser ---------- */
 const reSchool = /^Slutlig antagningsstatistik för\s+(.+)$/i;
-
-// Datarad: <Program> <KOD> <platser> <förstahand> <antagna> <LÄGSTA> [<Median>] [<Reserver>]
 const reData = /^(?<prog>.+?)\s+[A-ZÅÄÖ]{2,4}\s+\d+\s+\d+\s+\d+\s+(?<lagsta>\d+(?:[.,]\d+)?)(?:\s+\d+(?:[.,]\d+)?)?(?:\s+\d+)?\s*$/i;
-
-// ”18 stv.” -> auditförväntan
 const reStv = /(\d+)\s+stv\./i;
-
-// Sidnummer/tider
 const reJustPageNum = /^\d+$/;
 const reTimestamp = /^\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$/;
-
 const skipExact = new Set([
   'Gymnasieantagningen i Örebro län',
   'Kommunala gymnasieskolor',
@@ -130,9 +155,8 @@ const skipExact = new Set([
 
 function parse(text){
   const lines = text.split(/\r?\n/).map(cleanLine).filter(Boolean);
-
   let currentSchool = null;
-  const expected = new Map(); // school => expected stv
+  const expected = new Map();
   const rows = [];
   const missed = [];
 
@@ -142,46 +166,34 @@ function parse(text){
     if (reJustPageNum.test(raw)) continue;
     if (reTimestamp.test(raw)) continue;
 
-    // Ny (eller upprepad) skolrubrik
     const mSch = raw.match(reSchool);
     if (mSch){
       currentSchool = mSch[1].trim();
       continue;
     }
-    if (!currentSchool) continue; // hoppa tills vi har en skola
+    if (!currentSchool) continue;
 
-    // ”X stv.” -> spara expected för just den skolan (senaste värdet vinner)
     const mStv = raw.match(reStv);
     if (mStv){
       expected.set(currentSchool, parseInt(mStv[1], 10));
       continue;
     }
 
-    // Datarad?
     const m = raw.match(reData);
     if (m){
-      let prog = m.groups.prog
-        .replace(/\s{2,}/g, ' ')
-        .replace(/\s-\s/g, ' - ')
-        .trim();
-
-      // rensa rubrikspill
+      let prog = m.groups.prog.replace(/\s{2,}/g, ' ').replace(/\s-\s/g, ' - ').trim();
       if (/^Studieväg\s/i.test(prog)) continue;
-
       const lagsta = m.groups.lagsta;
       rows.push([currentSchool, prog, lagsta]);
     } else {
-      // felsökning – visa potentiella ”nästan”-rader
       if (/[A-Za-zÅÄÖåäö]/.test(raw) && !raw.startsWith('Slutlig antagningsstatistik') && !/period\s+\d+/i.test(raw)){
         missed.push(raw);
       }
     }
   }
-
   return {rows, expected, missed};
 }
 
-/* ---------- Hjälpfunktioner för UI ---------- */
 function deduplicateRows(rows){
   const seen = new Set();
   const out = [];
@@ -193,34 +205,24 @@ function deduplicateRows(rows){
   }
   return out;
 }
-
 function groupCountBySchool(rows){
   const map = new Map();
   for (const [school] of rows){
     map.set(school, (map.get(school)||0)+1);
   }
-  return map; // school => got
+  return map;
 }
-
 function showMissed(lines){
   missedPre.classList.remove('muted');
-  if (!lines.length){
-    missedPre.textContent = '—';
-    return;
-  }
+  if (!lines.length){ missedPre.textContent = '—'; return; }
   const cap = 150;
   const head = lines.slice(0, cap);
   missedPre.textContent = head.join('\n') + (lines.length>cap ? `\n… (${lines.length-cap} fler)` : '');
 }
-
 function showReport({rows, expected}){
   const total = rows.length;
   const sample = rows.slice(0, 12).map(r => `• ${r[0]} · ${r[1]} · ${r[2]}`).join('\n') || '(inget hittat)';
-
-  // räkna ”got” från slutliga raderna
   const gotMap = groupCountBySchool(rows);
-
-  // Bygg auditlista där vi har antingen expected, got, eller båda
   const allSchools = new Set([...expected.keys(), ...gotMap.keys()]);
   const auditLines = [...allSchools].sort((a,b)=>a.localeCompare(b)).map(school=>{
     const exp = expected.has(school) ? expected.get(school) : null;
@@ -237,7 +239,7 @@ function showReport({rows, expected}){
     `Kontroll (”X stv.”):\n${auditLines}`;
 }
 
-/* ---------- Wire up ---------- */
+/* ---------- Wire up extraction ---------- */
 btn.addEventListener('click', ()=>{
   const text = ta.value||'';
   if (!text.trim()){
@@ -245,14 +247,8 @@ btn.addEventListener('click', ()=>{
     return;
   }
   let {rows, expected, missed} = parse(text);
-
-  if (dedupe.checked){
-    rows = deduplicateRows(rows);
-  }
-
-  // sortera (Skola → Program)
+  if (dedupe.checked) rows = deduplicateRows(rows);
   rows.sort((a,b)=> (a[0]===b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
-
   showReport({rows, expected});
   showMissed(missed);
 
@@ -262,12 +258,13 @@ btn.addEventListener('click', ()=>{
 
   btnCopy.disabled = false;
   btnDl.disabled = false;
+  btnSupabase.disabled = false;
 
-  // Spara senaste CSV i minnet för knapparna
   btnCopy.dataset.csv = csv;
   btnDl.dataset.csv = csv;
 });
 
+/* ---------- Copy / download ---------- */
 btnCopy.addEventListener('click', async ()=>{
   try{
     await navigator.clipboard.writeText(btnCopy.dataset.csv || '');
@@ -281,6 +278,80 @@ btnDl.addEventListener('click', ()=>{
   const csv = btnDl.dataset.csv || '';
   const stamp = new Date().toISOString().slice(0,10);
   download(`antagning_orebro_${stamp}.csv`, csv);
+});
+
+/* ---------- Supabase upload ---------- */
+async function uploadToSupabase(csvText){
+  sbStatus.textContent = '';
+  const stamp = new Date().toISOString().slice(0,10);
+  const versionPath = `orebro/antagning_${stamp}.csv`;
+  const latestPath  = `orebro/latest.csv`;
+
+  // 1) Skriv versionsfil (ej upsert: låt faila om dubbelladd)
+  let { data: vData, error: vErr } = await supabase
+    .storage.from('antagning')
+    .upload(versionPath, new Blob([csvText], {type:'text/csv;charset=utf-8;'}), { upsert: false });
+
+  if (vErr && vErr.message && !/The resource already exists/i.test(vErr.message)){
+    throw new Error('Versionsuppladdning misslyckades: ' + vErr.message);
+  }
+
+  // 2) Upsert latest.csv (skriv över)
+  let { data: lData, error: lErr } = await supabase
+    .storage.from('antagning')
+    .upload(latestPath, new Blob([csvText], {type:'text/csv;charset=utf-8;'}), { upsert: true });
+
+  if (lErr){
+    throw new Error('latest.csv-uppladdning misslyckades: ' + lErr.message);
+  }
+
+  const publicBase = `${SUPABASE_URL}/storage/v1/object/public/antagning`;
+  return {
+    versionUrl: `${publicBase}/${versionPath}`,
+    latestUrl:  `${publicBase}/${latestPath}`
+  };
+}
+
+btnSupabase.addEventListener('click', async ()=>{
+  try{
+    const csv = btnSupabase.dataset.csv || btnCopy.dataset.csv || '';
+    if (!csv){
+      alert('Skapa CSV först (Extrahera) innan du sparar.');
+      return;
+    }
+    btnSupabase.disabled = true;
+    btnSupabase.textContent = 'Laddar upp…';
+
+    const {versionUrl, latestUrl} = await uploadToSupabase(csv);
+
+    urlLatestEl.textContent = latestUrl;
+    urlVersionEl.textContent = versionUrl;
+    copyLatestBtn.disabled = false;
+    copyVersionBtn.disabled = false;
+
+    sbStatus.innerHTML = `✅ Uppladdat. Använd i Sheets: <code>=IMPORTDATA("${latestUrl}")</code>`;
+  } catch (e){
+    sbStatus.innerHTML = `<span class="bad">⚠ ${e.message||e}</span>`;
+  } finally {
+    btnSupabase.textContent = 'Spara till Supabase';
+    btnSupabase.disabled = false;
+  }
+});
+
+/* ---------- Copy URL buttons ---------- */
+copyLatestBtn.addEventListener('click', async ()=>{
+  const s = urlLatestEl.textContent.trim();
+  if (!s || s==='—') return;
+  await navigator.clipboard.writeText(s);
+  const t = copyLatestBtn.textContent; copyLatestBtn.textContent = 'Kopierad!';
+  setTimeout(()=>copyLatestBtn.textContent=t, 1000);
+});
+copyVersionBtn.addEventListener('click', async ()=>{
+  const s = urlVersionEl.textContent.trim();
+  if (!s || s==='—') return;
+  await navigator.clipboard.writeText(s);
+  const t = copyVersionBtn.textContent; copyVersionBtn.textContent = 'Kopierad!';
+  setTimeout(()=>copyVersionBtn.textContent=t, 1000);
 });
 </script>
 </body>
