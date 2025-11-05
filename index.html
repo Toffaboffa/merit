@@ -76,8 +76,7 @@
         if(!rowsByY.has(key)) rowsByY.set(key, []);
         rowsByY.get(key).push({x,str: it.str||''});
       }
-      // VIKTIGT: gå uppifrån→ned (liten y till stor y)
-      const ys = Array.from(rowsByY.keys()).sort((a,b)=> a-b);
+      const ys = Array.from(rowsByY.keys()).sort((a,b)=> b-a);
       const lines = [];
       for(const y of ys){
         const bits = rowsByY.get(y).sort((a,b)=> a.x-b.x).map(b=>b.str);
@@ -87,7 +86,6 @@
           .replace(/forsta-?\s*handssokande/gi,'första-handssökande')
           .replace(/Lagsta\s+jamforelsetal/gi,'Lägsta jämförelsetal')
           .replace(/Medianvarde/gi,'Medianvärde')
-          .replace(/Studievag/gi,'Studieväg')
           .replace(/\bAntal\s+forsta\b/gi,'Antal första')
           .replace(/[‐–—―]/g,'-'); // normalisera alla ”dash”-varianter
         lines.push(line);
@@ -95,38 +93,58 @@
       return lines;
     }
 
-    // Skolhuvuden
+    // Rubriker/skolrad
     const isSchoolHeaderSameLine = l => /^Slutlig antagningsstatistik för\s+.+/i.test(l);
     const extractSchoolSameLine = l => l.replace(/^Slutlig antagningsstatistik för\s+/i,'').trim();
     const isSchoolHeaderBare = l => /^Slutlig antagningsstatistik för$/i.test(l); // två-radig variant
-    const isBareSchool = l => /(skolan|gymnasiet|gymnasium|Idrottsgym)\.?$/i.test(l) && !/\d/.test(l);
+    // Ny robust skolrad-detektor (fångar Gy, trunkerade gymnasiu, m.m.)
+    const isBareSchool = l => {
+      if (/\d/.test(l)) return false; // inga siffror i ren skolrad
+      return /\b(skola[n]?|gymnasiu[m]?|gymnasium|gymnasiet|idrottsgym\w*|gy|gym)\b\.?$/i.test(l.trim());
+    };
 
-    // Program-parser
+    // Program-parser (robust mot hoplimningar)
     function extractPrograms(line){
-      const RE = new RegExp(
-        '(?:' +
-          'Programinriktat\\s+val\\s+mot\\s+[^.]+' +
-        '|' +
-          'Yrkesintro\\.\\s*mot\\s+[^.]+' +
-        '|' +
-          '[A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9 \\-]+?(?:progr\\.|programmet)(?:\\s*-\\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö0-9 \\-]+)?' +
-        ')',
-        'g'
-      );
-      const arr = [];
-      let m;
-      while((m = RE.exec(line))!==null){
-        const t = norm(m[0].replace(/\bprogrammet\b/i,'progr.'));
-        if (/^(Studieväg|Antal|Medianvärde|Lägsta|KAM|AE|DEM|LS|PI|KA|RU|TU|VI|AFG|DBG|GRI|JGY|NTI|PRA|PRO|REA|RYT|YRK|KID)\b/i.test(t)) continue;
-        arr.push(t);
+      const src = norm(line)
+        .replace(/\bprogrammet\b/gi,'progr.')
+        .replace(/\s+-\s+/g,' - ');
+
+      const chunks = [];
+      // 1) bevara Programinriktat val / Yrkesintro-block
+      const keepRE = /(Programinriktat\s+val\s+mot\s+[^.]+\.?|Yrkesintro\.\s*mot\s+[^.]+\.?)/gi;
+      let keep; const keepSpans = [];
+      while((keep = keepRE.exec(src))!==null){
+        keepSpans.push({s:keep.index, e:keep.index+keep[0].length, t:norm(keep[0])});
       }
-      return arr;
+      // maska bevarade delar
+      let masked = src.split('');
+      for(const {s,e} of keepSpans){ for(let i=s;i<e;i++) masked[i] = '\u0000'; }
+      const rest = masked.join('');
+
+      // 2) plocka övriga ”X progr.”
+      const progRE = /([A-Za-zÅÄÖåäö0-9 .]+?progr\.(?:\s*-\s*[A-Za-zÅÄÖåäö0-9 .]+)?)/gi;
+      let m; while((m = progRE.exec(rest))!==null){
+        const t = norm(m[1]).replace(/\u0000/g,'').trim();
+        if(!t) continue;
+        if (/^(Studieväg|Antal|Medianvärde|Lägsta|[A-ZÅÄÖ]{2,3})\b/i.test(t)) continue;
+        chunks.push(t);
+      }
+      // 3) lägg tillbaka de bevarade i slutet (ordning bevaras)
+      for(const k of keepSpans) chunks.push(k.t);
+
+      // 4) normalisering/filtrering
+      const clean = chunks
+        .map(t => t.replace(/\s{2,}/g,' ')
+                   .replace(/\bFörsäljnings-\s+och\b/gi,'Försäljnings- och')
+                   .replace(/\bEstetiska\s+progr\.\s*-\s*Estetik\s+och\s+media\b/gi,'Estetiska progr. - Estetik och media'))
+        .filter(t => !/^(stv\.|Sydnärkes|Karlskoga|Örebro|Lindesberg|Hällefors)\b/i.test(t));
+      return clean;
     }
 
     // Labeler
-    const LAB_LAGSTA = /Lägsta\s+jämförelsetal/i;
-    const LAB_ANTAGNA = /Antal\s+antagna/i;
-    const LAB_ANY = /(Antal platser|Antal första-?handssökande|Antal antagna|Lägsta\s+jämförelsetal|Medianvärde|Antal reserver|Studieväg)/i;
+    const LAB_LAGSTA = /\bLägsta\s+jämförelsetal\b/i;
+    const LAB_ANTAGNA = /\bAntal\s+antagna\b/i;
+    const LAB_ANY = /\b(Antal platser|Antal första-?handssökande|Antal antagna|Lägsta\s+jämförelsetal|Medianvärde|Studieväg)\b/i;
     const CODE_ROW = /^(?:[A-ZÅÄÖ]{2,3}\s+){3,}[A-ZÅÄÖ]{2,3}$/;
 
     async function parsePdfFromArrayBuffer(buf){
@@ -135,53 +153,31 @@
       const debug = [];
 
       let currentSchool = null;
-      let awaitSchoolName = false;
+      let awaitSchoolName = false; // vi såg ”Slutlig antagningsstatistik för” utan namn – vänta in nästa skolrad
 
-      // Buffertar
-      let preSchoolProgs = []; // program hittade innan skolnamn
-      let pendingProgs = [];   // program för aktuell skola
-      let antagnaQueue = [];   // Antal antagna (en per program)
-      let lagstaQueue = [];    // Lägsta merit (endast för program med antagna>0)
-
+      let pendingProgs = [];
+      let lagstaQueue = [];
       let collectingLagsta = false;
-      let collectingAntagna = false;
 
-      function resetQueues(){ antagnaQueue = []; lagstaQueue = []; pendingProgs = []; }
-
-      function pairIfPossible(reason=''){
-        if(!currentSchool || !pendingProgs.length) return; // behöver program + skola
-        if(!antagnaQueue.length && !lagstaQueue.length) return; // inga data att para
-
-        // Bygg per program: om antagna[i] > 0, ta nästa lagsta; annars tomt
-        const resultLag = [];
-        let j = 0; // index i lagstaQueue
-        for(let i=0;i<pendingProgs.length;i++){
-          const a = (typeof antagnaQueue[i] === 'number') ? antagnaQueue[i] : 0;
-          if(a > 0){
-            resultLag.push(j < lagstaQueue.length ? lagstaQueue[j++] : '');
-          }else{
-            resultLag.push('');
+      function flushPairing(reason=''){
+        if(currentSchool && pendingProgs.length){
+          if(!lagstaQueue.length){
+            // pad:a tomma merits om pdf:en splittat blocket
+            lagstaQueue = Array(pendingProgs.length).fill('');
           }
+          const n = Math.min(pendingProgs.length, lagstaQueue.length);
+          for(let i=0;i<n;i++){
+            const val = lagstaQueue[i];
+            const merit = (typeof val === 'number' && !Number.isNaN(val)) ? val : '';
+            allRows.push([currentSchool, pendingProgs[i], merit]);
+          }
+          debug.push(`  [MATCH] ${n} rader → ${currentSchool}${reason?(' | '+reason):''}`);
+        }else if(currentSchool && lagstaQueue.length && !pendingProgs.length){
+          debug.push(`  [WARN] ${currentSchool}: LÄGSTA utan program (${lagstaQueue.length})${reason?(' | '+reason):''}`);
         }
-        const n = pendingProgs.length;
-        for(let i=0;i<n;i++) allRows.push([currentSchool, pendingProgs[i], resultLag[i]]);
-        debug.push(`  [MATCH] ${n} rader → ${currentSchool}${reason?(' | '+reason):''}`);
-        // töm inför nästa block
-        resetQueues();
-      }
-
-      function startLagsta(){ collectingLagsta = true; lagstaQueue = []; debug.push('  [LÄGSTA] start'); }
-      function endLagsta(){ collectingLagsta = false; }
-      function startAntagna(){ collectingAntagna = true; antagnaQueue = []; debug.push('  [ANTAGNA] start'); }
-      function endAntagna(){ collectingAntagna = false; }
-
-      function setSchool(name, why){
-        // para ev. hängande förra skolan innan vi byter
-        pairIfPossible('slut på skola');
-        currentSchool = name.trim();
-        debug.push(`[SKOLA] ${currentSchool}`);
-        // om det fanns buffrade program innan skolnamn, flytta in dem nu
-        if(preSchoolProgs.length){ pendingProgs.push(...preSchoolProgs); preSchoolProgs = []; }
+        pendingProgs = [];
+        lagstaQueue = [];
+        collectingLagsta = false;
       }
 
       for(let p=1; p<=pdf.numPages; p++){
@@ -195,43 +191,77 @@
         for(let i=0;i<lines.length;i++){
           const L = lines[i];
 
-          // Tvåradig skolrubrik
-          if (isSchoolHeaderBare(L)){ awaitSchoolName = true; continue; }
-          if (awaitSchoolName && isBareSchool(L)){ setSchool(L, 'bare'); awaitSchoolName = false; continue; }
-
-          // Enradig skolrubrik med namn
-          if (isSchoolHeaderSameLine(L)){ setSchool(extractSchoolSameLine(L), 'same-line'); awaitSchoolName = false; continue; }
-
-          // Fristående skolrad (t.ex. "Alléskolan")
-          if (isBareSchool(L)){ setSchool(L, 'bare-line'); awaitSchoolName = false; continue; }
-
-          // Labeler och blockstyrning
-          if(LAB_ANY.test(L)){
-            if(LAB_ANTAGNA.test(L)){ startAntagna(); continue; }
-            if(LAB_LAGSTA.test(L)){ startLagsta(); continue; }
-            // annan label avslutar ev. pågående block
-            if(collectingAntagna) endAntagna();
-            if(collectingLagsta){ endLagsta(); /* försök para om vi har allt */ pairIfPossible('slut på LÄGSTA-block'); }
+          // Tvåradig skolrubrik – vänta in nästa rimliga skolrad
+          if (isSchoolHeaderBare(L)){
+            flushPairing('ny [Slutlig antagningsstatistik för] (tvåradig)');
+            awaitSchoolName = true;
+            continue;
+          }
+          if (awaitSchoolName && isBareSchool(L)){
+            currentSchool = L.trim();
+            debug.push(`[SKOLA] ${currentSchool}`);
+            awaitSchoolName = false;
             continue;
           }
 
-          // Samla nummer i block
-          if(collectingAntagna){ const nums = getNums(L); if(nums.length) antagnaQueue.push(...nums); if(CODE_ROW.test(L)){ endAntagna(); }
-            continue; }
-          if(collectingLagsta){ const nums = getNums(L); if(nums.length) lagstaQueue.push(...nums); if(CODE_ROW.test(L)){ endLagsta(); pairIfPossible('kodrad (AE/DEM/…)'); }
-            continue; }
+          // Enradig skolrubrik med namn
+          if (isSchoolHeaderSameLine(L)){
+            flushPairing('ny [Slutlig antagningsstatistik för]');
+            currentSchool = extractSchoolSameLine(L);
+            debug.push(`[SKOLA] ${currentSchool}`);
+            awaitSchoolName = false;
+            continue;
+          }
 
-          // Programrader (utanför labels)
+          // Fristående ”skolrad” (t.ex. ”Alléskolan”/”Drottning Blankas Gy”/”Rytmus musikgymnasiu”)
+          if (isBareSchool(L)){
+            flushPairing('ny [skolrad]');
+            currentSchool = L.trim();
+            debug.push(`[SKOLA] ${currentSchool}`);
+            awaitSchoolName = false;
+            continue;
+          }
+
+          // Labeler
+          if(LAB_ANY.test(L)){
+            if(LAB_LAGSTA.test(L)){
+              collectingLagsta = true;
+              lagstaQueue = [];
+              debug.push(`  [LÄGSTA] start`);
+            }else{
+              if(collectingLagsta){
+                collectingLagsta = false;
+                flushPairing('slut på LÄGSTA-block');
+              }
+            }
+            continue;
+          }
+
+          // Inuti LÄGSTA: samla siffror; avsluta vid kodrad/ny etikett
+          if(collectingLagsta){
+            const nums = getNums(L);
+            if(nums.length) lagstaQueue.push(...nums);
+            if(CODE_ROW.test(L) || LAB_ANTAGNA.test(L)){
+              collectingLagsta = false;
+              flushPairing('slut på LÄGSTA-block (kod/etikett)');
+            }
+            continue;
+          }
+
+          // Utanför LÄGSTA: samla program över flera rader
           const progs = extractPrograms(L);
           if(progs.length){
-            if(currentSchool){ pendingProgs.push(...progs); }
-            else{ preSchoolProgs.push(...progs); debug.push('  [BUF] Program innan skolnamn → buffrar'); }
+            if(!currentSchool){
+              debug.push(`  [WARN] Program utan känd skola → hoppar`);
+              continue;
+            }
+            pendingProgs.push(...progs);
           }
         }
       }
 
-      // Sista parning/flush vid EOF
-      pairIfPossible('EOF');
+      // sista flush
+      flushPairing('EOF');
 
       debug.push(`--- Totalt extraherade rader: ${allRows.length}`);
       debugEl.textContent = debug.join('\n');
@@ -245,7 +275,13 @@
         const tr = document.createElement('tr');
         const td1 = document.createElement('td'); td1.textContent = skola; tr.appendChild(td1);
         const td2 = document.createElement('td'); td2.textContent = inr;   tr.appendChild(td2);
-        const td3 = document.createElement('td'); td3.textContent = (typeof lag==='number'? String(lag).replace('.',',') : String(lag)); tr.appendChild(td3);
+        const td3 = document.createElement('td');
+        if (typeof lag === 'number' && !Number.isNaN(lag)) {
+          td3.textContent = String(lag).replace('.', ',');
+        } else {
+          td3.textContent = '';
+        }
+        tr.appendChild(td3);
         tbody.appendChild(tr);
       }
       outTable.hidden = rows.length === 0;
