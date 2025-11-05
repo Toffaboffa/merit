@@ -65,7 +65,15 @@
 
     const norm = s => (s||'')
       .replace(/\u00AD/g,'')                // mjukt bindestreck
-      .replace(/[‐--–—―]/g,'-')            // alla bindestreck-varianter
+// 1) Hyphen-minus först i klassen (ingen range bildas)
+      .replace(/[-\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, '-')  // hyphen, figure/en/em dashes + minus
+
+// eller 2) Escapa ASCII-hyphen om du vill ha den mitt i
+// .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212\-]/g, '-')
+
+// eller 3) Använd ett intervall för 2010–2015 + extra tecken
+// .replace(/[\u2010-\u2015\u2212-]/g, '-')  // hyphen-minus sist i klassen
+
       .replace(/\s+/g,' ')
       .trim();
 
