@@ -20,9 +20,8 @@
     tr:hover td{background:#0c1222}
     .muted{color:var(--muted)}
     details{margin-top:14px}
-    pre{white-space:pre-wrap;font-size:12px;background:#0f172a;border:1px solid var(--border);padding:10px;border-radius:8px;max-height:320px;overflow:auto}
+    pre{white-space:pre-wrap;font-size:12px;background:#0f172a;border:1px solid var(--border);padding:10px;border-radius:8px;max-height:360px;overflow:auto}
     .toolbar{display:flex;gap:8px;margin-top:10px}
-    label{display:inline-flex;gap:8px;align-items:center;font-size:12px;color:var(--muted)}
   </style>
 </head>
 <body>
@@ -34,7 +33,6 @@
     </div>
     <div class="toolbar">
       <button id="exportCsvBtn" disabled>Exportera CSV</button>
-      <label><input type="checkbox" id="aggr"/> Aggressiv radbyggare</label>
       <small class="muted">Resultat: <b>Skola</b> · <b>Inriktning</b> · <b>Lägsta Merit</b></small>
     </div>
   </header>
@@ -48,7 +46,7 @@
     </table>
 
     <details>
-      <summary>Visa debug (första ~200 byggda rader)</summary>
+      <summary>Visa debug (första ~150 byggda rader)</summary>
       <pre id="debugLines"></pre>
     </details>
   </main>
@@ -63,24 +61,15 @@
     const tbody = outTable.querySelector('tbody');
     const debugEl = document.getElementById('debugLines');
     const exportCsvBtn = document.getElementById('exportCsvBtn');
-    const aggrBox = document.getElementById('aggr');
 
     const MARKER_ANY = 'Slutlig antagningsstatistik';
-    const SCHOOL_LINE = /^Slutlig antagningsstatistik för\b/i;
-    const HEADER_ROW = /^(Antal första-|Studieväg\b|Fristående gymnasieskolor$|Kommunala gymnasieskolor$)/i;
-    const COUNT_ROW  = /^\s*\d+\s*stv\.\s*$/i;
-
     const norm = s => (s||'').replace(/\s+/g,' ').trim();
-    const isMostlyNumbers = s => /^(\d|[.,]|\s)+$/.test((s||'').trim());
 
-    // ———————————————————————
-    // 1) Radbyggare (y-binning)
-    // ———————————————————————
-    function itemsToLines(items, aggressive=false){
-      const rows = new Map();
-      const yq = aggressive ? 4 : 2; // grovare binning vid behov (hjälper din PDF)
+    // pdf.js → rader
+    function itemsToLines(items){
+      const rows = new Map(), yq = 2;
       for(const it of items){
-        const t = it.transform, y=t[5], x=t[4];
+        const [ , , , , x, y ] = it.transform;
         const key = Math.round(y / yq) * yq;
         if(!rows.has(key)) rows.set(key, []);
         rows.get(key).push({ x, str: it.str });
@@ -95,152 +84,146 @@
       return lines;
     }
 
-    // ———————————————————————
-    // 2) Skolupptäckt
-    // ———————————————————————
-    function looksLikeSchoolName(line){
-      // Ex. "Alléskolan", "Möckelngymnasiet", "Karolinska gymnasiet", "Rudbecksgymnasiet", "Tullängsgymnasiet", "Virginska gymnasiet"
-      if(/(skolan|gymnasiet|gymnasium)\b/i.test(line) && !/\d/.test(line) && line.length <= 60){
-        return norm(line.replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö \-\.]/g,''));
+    // Skolnamn
+    function detectSchool(line){
+      if(line.includes(MARKER_ANY)){
+        const before = line.split(MARKER_ANY)[0].replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö .\-]/g,'').trim();
+        if(before) return before;
+      }
+      // Även ensamma skolrader som "Alléskolan"
+      if(/(skolan|gymnasiet|gymnasium)\.?$/i.test(line) && !/\d/.test(line) && line.length <= 60){
+        return line.trim();
       }
       return null;
     }
 
-    // ———————————————————————
-    // 3) Rad-läge (”<prog> <KOD> <tal…>”)
-    // ———————————————————————
-    const progRowRe = /^(.+?)\s+([A-ZÅÄÖ]{2,4})\s+([\d.,\s]+)$/;
+    // Programnamn = svansen
+    const progRe = /(Programinriktat val mot .*?|Yrkesintro\.\s*mot .*?|[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+?progr\.(?:\s*-\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+)?)$/i;
+
+    // Heuristik: koder som "AE", "DEM", "KAM", "LS", "PI", "KA", "RU", "TU", "VI", "AFG", "DBG", "GRI", "JGY", "LBS", "NTI", "PRA", "PRO", "REA", "RYT", "YRK", "KID", ...
+    const codeRe = /\b[A-ZÅÄÖ]{2,3}\b/;
+
+    // Delar upp ihopklistrade tal (t.ex. "185172" → "185 1 72")
+    function splitStuckNumbers(s){
+      // Sätt mellanslag mellan siffror och bokstav (t.ex. "172AE" → "172 AE")
+      s = s.replace(/(\d)([A-ZÅÄÖ])/g,'$1 $2');
+
+      // Splitta jättelånga sifferklumpar i plausibla grupper
+      // Ex: 185172 → 185 1 72  |  2503125 → 250 3 125
+      s = s.replace(/\b(\d{5,7})\b/g, (m) => {
+        // försök "… 1 2" eller "… 0 2" i slutet, annars sista 2–3 som FH och resten reserver/L/M
+        const n = m.length;
+        if(n === 5)  return m.slice(0,3) + ' ' + m.slice(3,4) + ' ' + m.slice(4);
+        if(n === 6)  return m.slice(0,3) + ' ' + m.slice(3,4) + ' ' + m.slice(4);
+        if(n === 7)  return m.slice(0,3) + ' ' + m.slice(3,5) + ' ' + m.slice(5);
+        return m;
+      });
+
+      // Se till att separera dubbla decimaler: "212.5185" → "212.5 185"
+      s = s.replace(/(\d+\.\d{1,2})(\d{2,3})\b/g, '$1 $2');
+
+      return s;
+    }
+
+    // Hämta alla tal i sträng (komma eller punkt)
     const numRe = /\b\d{1,3}(?:[.,]\d+)?\b/g;
-    const numsOf = s => Array.from((s||'').matchAll(numRe)).map(m => parseFloat(m[0].replace(',','.')));
-    function cleanProgramName(s){
-      return s.replace(/^\-\s*/,'').replace(/\bprogrammet\b/gi,'progr.').replace(/\s{2,}/g,' ').trim();
-    }
-    function lagstaFromNumbers(nums){
-      if(nums.length >= 4) return nums[3];
-      if(nums.length === 3) return nums[2];
-      if(nums.length === 2) return nums[1];
-      if(nums.length === 1) return nums[0];
+    const nums = (s) => Array.from((s||'').matchAll(numRe)).map(m => parseFloat(m[0].replace(',','.')));
+
+    // Välj LÄGSTA ur “tal före KOD” enligt denna PDF-layout:
+    // [Antagna, Lägsta, Median, Reserver, (möjl. Förstahand)] → vi tar "Lägsta" = index 1 bland de sista 4–5 talen.
+    function pickLagstaFromLeft(leftStr){
+      const arr = nums(leftStr);
+      if(arr.length >= 4){
+        const last4 = arr.slice(-5); // ta upp till 5, för säkerhets skull
+        // heuristik: hitta sekvensen där ett rimligt “antagna” (heltal 0–200) följs av ett “poäng-tal” (0–340, ofta .0/.25/.5/.75)
+        // enklast: ta näst sista “stora” poängkandidat i last4-blocket
+        // Men bäst: position 1 i blocket [A,L,M,R,(FH?)] från vänster inom last4/5.
+        // Om vi har 5 → anta [FH, A, L, M, R]; om 4 → [A, L, M, R].
+        if(last4.length === 5) return last4[2]; // L
+        return last4[1]; // L när 4 värden
+      }
+      if(arr.length === 3){
+        // ibland saknas FH eller R → anta [A,L,M]
+        return arr[1];
+      }
+      if(arr.length === 2){
+        // [A,L] – ta #2
+        return arr[1];
+      }
+      if(arr.length === 1){
+        // Endast ett poängtal → ta det
+        return arr[0];
+      }
       return null;
     }
 
-    // ———————————————————————
-    // 4) Block-läge (Studieväg + Lägsta)
-    // ———————————————————————
-    function extractProgramsFromStudievag(text){
-      const t = text.replace(/\u00AD/g,'').replace(/\s{2,}/g,' ');
-      const re = new RegExp([
-        '(Programinriktat val mot [A-Za-zÅÄÖåäöÉéÜüÏïÖö\\- och\\.]+?progr(?:\\.-\\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\\- ]+)?\\.)',
-        '(Yrkesintro\\.\\s*mot [A-Za-zÅÄÖåäöÉéÜüÏïÖö\\- och\\.]+?progr(?:\\.-\\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\\- ]+)?\\.)',
-        '([A-ZÅÄÖa-zåäöÉéÜüÏïÖö\\- ]+?progr\\.(?:\\s*-\\s*[A-ZÅÄÖa-zåäöÉéÜüÏïÖö\\- ]+)?\\.)'
-      ].join('|'),'g');
-      const hits = [];
-      let m;
-      while((m = re.exec(t)) !== null){
-        const raw = (m[1]||m[2]||m[3]||'').trim();
-        if(!raw) continue;
-        const cleaned = cleanProgramName(raw);
-        if(cleaned.toLowerCase() !== 'stv.' && cleaned.length > 5) hits.push(cleaned.replace(/\.$/,'').trim());
-      }
-      return hits;
-    }
-    function collectMerits(lines, startIdx){
-      const vals = [];
-      for(let i=startIdx+1; i<lines.length; i++){
-        const L = lines[i];
-        if(!isMostlyNumbers(L)) break;
-        const nums = numsOf(L).filter(v => v>=0 && v<=400);
-        vals.push(...nums);
-      }
-      return vals;
+    function cleanProgramName(s){
+      return s
+        .replace(/\bprogrammet\b/i,'progr.')
+        .replace(/^\s*-\s*/,'') // ta bort inledande " - "
+        .replace(/\s{2,}/g,' ')
+        .trim();
     }
 
     async function parsePdfFromArrayBuffer(buf){
       const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-
+      let currentSchool = null;
       const out = [];
       const debugLines = [];
-      let currentSchool = null;
-      let pendingSchool = null;
-
-      // Block-läge ackumulatorer
-      let programs = [];
-      let merits = [];
-      const flush = () => {
-        if(currentSchool){
-          const n = Math.min(programs.length, merits.length);
-          for(let i=0;i<n;i++){
-            out.push([currentSchool, programs[i], merits[i]]);
-          }
-        }
-        programs = [];
-        merits = [];
-      };
 
       for(let p=1; p<=pdf.numPages; p++){
         const page = await pdf.getPage(p);
-        // prova normal; om 0 rader hittas senare, kan användaren slå på ”Aggressiv”
-        const lines = itemsToLines(await page.getTextContent().then(tc => tc.items), aggrBox.checked);
+        const textContent = await page.getTextContent();
+        let lines = itemsToLines(textContent.items);
 
-        for(const L of lines){ if (debugLines.length < 200) debugLines.push(L); }
+        for(const L of lines){ if (debugLines.length < 150) debugLines.push(L); }
 
-        for(let i=0;i<lines.length;i++){
-          const raw = lines[i];
+        // Förhandsfix: separera ihopkladdade nummer/bokstavsgränser
+        lines = lines.map(splitStuckNumbers);
+
+        for(const raw of lines){
           const line = norm(raw);
 
-          // Fånga kandidat-skolnamn
-          const lk = looksLikeSchoolName(line);
-          if(lk) pendingSchool = lk;
+          const sch = detectSchool(line);
+          if (sch) { currentSchool = sch; continue; }
+          if (!currentSchool) continue;
 
-          // ”Slutlig antagningsstatistik för …” (med/utan namn)
-          if(SCHOOL_LINE.test(line)){
-            // Om namnet saknas på samma rad – ta senaste skolnamn vi såg
-            const nameOnSame = line.replace(SCHOOL_LINE,'').trim();
-            currentSchool = nameOnSame || pendingSchool || currentSchool;
-            // ny skola → flush ev. samlat block
-            if(programs.length || merits.length) flush();
+          const mProg = line.match(progRe);
+          if(!mProg) continue;
+
+          // Delar upp i: LEFT | PROGRAM (svansen)
+          const prog = cleanProgramName(mProg[0]);
+          const left = norm(line.slice(0, mProg.index));
+
+          // Hitta skolkod strax före programmet (i LEFT-änden)
+          // Vi letar “... [tal/tal]  KOD  [platser]” i slutet av LEFT
+          // Ta sista KOD i LEFT:
+          const leftParts = left.split(/\s+/);
+          let codeIdx = -1;
+          for(let i=leftParts.length-1; i>=0; i--){
+            if(codeRe.test(leftParts[i])){ codeIdx = i; break; }
+          }
+          if(codeIdx === -1){
+            // inget KOD → hoppa ändå, men försök ändå plocka LÄGSTA ur hela LEFT
+            const lag = pickLagstaFromLeft(left);
+            if(lag !== null) out.push([currentSchool, prog, lag]);
             continue;
           }
 
-          if(!currentSchool) continue;              // ignorera innan första skola
-          if(HEADER_ROW.test(line)) continue;
-          if(COUNT_ROW.test(line)) { flush(); continue; }
-          if(/^\d{2}-\d{2}-\d{2}/.test(line)) continue; // tidsstämplar
+          // Antal platser = tokenen direkt efter KOD (om siffra)
+          const code = leftParts[codeIdx];
+          const seats = (codeIdx+1 < leftParts.length && /^\d+$/.test(leftParts[codeIdx+1]))
+                        ? parseInt(leftParts[codeIdx+1],10) : null;
 
-          // ——— Rad-läge: <prog> <KOD> <tal…>
-          const pm = line.match(progRowRe);
-          if(pm){
-            const program = cleanProgramName(pm[1]);
-            const numbers = numsOf(pm[3]);
-            const lagsta = lagstaFromNumbers(numbers);
-            if(Number.isFinite(lagsta)) out.push([currentSchool, program, lagsta]);
-            continue;
-          }
+          // LEFT-OF-CODE = allt före KOD-token → används för att hämta “Lägsta”
+          const leftOfCode = leftParts.slice(0, codeIdx).join(' ');
+          const lagsta = pickLagstaFromLeft(leftOfCode);
 
-          // ——— Block-läge: hitta Studieväg → samla program
-          if(line.startsWith('Studieväg')){
-            // samla text framåt som inte är nummerblock/huvuden
-            let block = '';
-            for(let j=i+1; j<lines.length; j++){
-              const L2 = lines[j];
-              if(/^(Antal|Medianvärde|Lägsta jämförelsetal|Studieväg\b|Slutlig antagningsstatistik\b|Fristående gymnasieskolor$|Kommunala gymnasieskolor$)/i.test(L2)) break;
-              if(isMostlyNumbers(L2)) break;
-              block += ' ' + L2;
-            }
-            const ps = extractProgramsFromStudievag(block);
-            if(ps.length) programs.push(...ps);
-            continue;
-          }
-
-          // ——— Block-läge: meritblock
-          if(line.startsWith('Lägsta jämförelsetal')){
-            const vals = collectMerits(lines, i);
-            if(vals.length) merits.push(...vals);
-            continue;
+          if(lagsta !== null){
+            out.push([currentSchool, prog, lagsta]);
           }
         }
       }
-      // sista skolan
-      if(programs.length || merits.length) flush();
 
       debugLines.push(`--- Totalt: ${out.length} rader`);
       debugEl.textContent = debugLines.join('\n');
@@ -249,31 +232,41 @@
 
     function renderRows(rows){
       tbody.innerHTML = '';
-      rows.sort((a,b)=> (a[0]===b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
-      for(const [skola,inr,lag] of rows){
+      // Släng dubbletter (PDF kan ha dubblerade block)
+      const key = r => r[0]+'||'+r[1];
+      const seen = new Set();
+      const unique = [];
+      for(const r of rows){
+        const k = key(r);
+        if(seen.has(k)) continue;
+        seen.add(k);
+        unique.push(r);
+      }
+
+      // Sortera
+      unique.sort((a,b)=> (a[0]===b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
+
+      for(const [skola,inr,lag] of unique){
         const tr = document.createElement('tr');
         const td1 = document.createElement('td'); td1.textContent = skola; tr.appendChild(td1);
         const td2 = document.createElement('td'); td2.textContent = inr;   tr.appendChild(td2);
-        const td3 = document.createElement('td'); td3.textContent = (typeof lag==='number' ? String(lag).replace('.',',') : lag); tr.appendChild(td3);
+        const td3 = document.createElement('td'); td3.textContent = String(lag).replace('.',','); tr.appendChild(td3);
         tbody.appendChild(tr);
       }
       outTable.hidden = false;
-      statusEl.textContent = `Klar — ${rows.length} rader`;
-      exportCsvBtn.disabled = rows.length === 0;
-      exportCsvBtn.onclick = () => exportCSV(rows);
+      statusEl.textContent = `Klar — ${unique.length} rader`;
+      exportCsvBtn.disabled = unique.length === 0;
+      exportCsvBtn.onclick = () => exportCSV(unique);
     }
 
     // Svensk CSV
     function exportCSV(rows){
       const header = ['Skola','Inriktning','Lägsta Merit'];
       const esc = (s) => `"${String(s).replace(/"/g,'""')}"`;
-      const fmtNumSV = (v) => (typeof v === 'number' ? String(v).replace('.', ',') : String(v));
+      const fmt = (v) => (typeof v === 'number' ? String(v).replace('.', ',') : String(v));
       const delimiter = ';';
-      const body = rows.map(([skola, inr, lag]) =>
-        [esc(skola), esc(inr), esc(fmtNumSV(lag))].join(delimiter)
-      );
+      const body = rows.map(([a,b,c]) => [esc(a), esc(b), esc(fmt(c))].join(delimiter));
       const csv = [header.map(esc).join(delimiter), ...body].join('\n');
-
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a'); a.href = url; a.download = 'antagning_orebro_2025.csv';
@@ -294,7 +287,7 @@
       }
     });
 
-    // Tysta pdf.js TT-varning (frivilligt)
+    // Tysta TT-varningen (frivilligt)
     try {
       if (pdfjsLib.VerbosityLevel) pdfjsLib.GlobalWorkerOptions.verbosity = pdfjsLib.VerbosityLevel.ERROR;
       const o = console.warn;
