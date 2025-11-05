@@ -2,194 +2,172 @@
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PDF Debug Viewer (råitems + grupperade rader)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PDF Debug — RAW & GROUPED</title>
   <link rel="icon" href="data:," />
   <style>
     :root{ --bg:#0b0f14; --fg:#e7effa; --muted:#94a3b8; --panel:#0f172a; --accent:#22c55e; --border:#1f2937; }
     html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
-    header{padding:12px 16px;border-bottom:1px solid var(--border);background:#0f172a;position:sticky;top:0;z-index:5}
-    .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-    input[type=file]{flex:1;min-width:260px;padding:10px;border-radius:10px;border:1px solid var(--border);background:#0f172a;color:var(--fg)}
-    button{padding:10px 12px;border-radius:10px;border:0;background:var(--accent);color:#05280f;font-weight:700;cursor:pointer}
+    header{padding:12px 16px;background:#0f172a;border-bottom:1px solid var(--border);position:sticky;top:0;z-index:1}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    input[type=file]{padding:8px;border:1px solid var(--border);border-radius:10px;background:#0f172a;color:var(--fg)}
+    button{padding:8px 12px;border-radius:10px;border:0;background:var(--accent);color:#05280f;font-weight:700;cursor:pointer}
     button:disabled{opacity:.5;cursor:not-allowed}
+    main{max-width:1100px;margin:0 auto;padding:16px}
+    details{margin:12px 0;border:1px solid var(--border);border-radius:10px;overflow:hidden}
+    summary{padding:10px 12px;background:#0d1326;font-weight:700}
+    pre{margin:0;padding:12px;white-space:pre-wrap;font-size:12px;background:#0f172a}
     .muted{color:var(--muted)}
-    main{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:1400px;margin:0 auto;padding:12px}
-    section{background:#0f172a;border:1px solid var(--border);border-radius:12px;overflow:hidden}
-    h2{margin:0;padding:10px 12px;background:#0d1326;border-bottom:1px solid var(--border);font-size:14px}
-    .tools{display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)}
-    .tools label{font-size:12px;color:var(--muted)}
-    pre{margin:0;padding:10px 12px;white-space:pre-wrap;max-height:70vh;overflow:auto;font-size:12px}
-    .pill{background:#091020;border:1px solid var(--border);padding:4px 8px;border-radius:999px}
+    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+    .pill{padding:6px 10px;border:1px solid var(--border);border-radius:999px;background:#0f172a}
+    label{display:flex;align-items:center;gap:6px}
   </style>
 </head>
 <body>
   <header>
     <div class="row">
       <input id="pdfFile" type="file" accept="application/pdf" />
-      <button id="loadBtn">Läs in</button>
+      <button id="runBtn">Debugga</button>
       <span id="status" class="muted"></span>
-      <span class="pill muted">Inget parsande. Endast debug.</span>
+    </div>
+    <div class="toolbar">
+      <span class="pill">
+        <label>yQuant:
+          <input id="yq" type="range" min="1" max="8" step="1" value="2" />
+          <span id="yqVal">2</span>
+        </label>
+      </span>
+      <button id="dlRaw">Ladda ner RAW JSON</button>
+      <button id="dlGrouped">Ladda ner GROUPED JSON</button>
+      <button id="dlGroupedCsv">Ladda ner GROUPED CSV</button>
     </div>
   </header>
 
-  <main>
-    <section>
-      <h2>Råa text-items (per sida)</h2>
-      <div class="tools">
-        <button id="exportRawBtn" disabled>Exportera RAW.json</button>
-      </div>
-      <pre id="rawBox">// RAW kommer här…</pre>
-    </section>
-
-    <section>
-      <h2>Grupperade rader (y-kvantisering)</h2>
-      <div class="tools">
-        <label>y-quantize:
-          <input id="yq" type="number" step="1" min="1" value="2" style="width:70px;margin-left:6px">
-        </label>
-        <button id="rebuildBtn" disabled>Bygg rader igen</button>
-        <button id="exportLinesBtn" disabled>Exportera LINES.json</button>
-      </div>
-      <pre id="linesBox">// Rader kommer här…</pre>
-    </section>
-  </main>
+  <main id="out"></main>
 
   <script type="module">
     import * as pdfjsLib from './vendor/pdfjs/pdf.mjs';
-    const worker = new Worker('./vendor/pdfjs/pdf.worker.mjs', { type: 'module' });
+    const worker = new Worker('./vendor/pdfjs/pdf.worker.mjs', { type:'module' });
     pdfjsLib.GlobalWorkerOptions.workerPort = worker;
 
-    const statusEl = document.getElementById('status');
-    const pdfInput = document.getElementById('pdfFile');
-    const loadBtn = document.getElementById('loadBtn');
-    const rebuildBtn = document.getElementById('rebuildBtn');
-    const exportRawBtn = document.getElementById('exportRawBtn');
-    const exportLinesBtn = document.getElementById('exportLinesBtn');
-    const rawBox = document.getElementById('rawBox');
-    const linesBox = document.getElementById('linesBox');
-    const yqInput = document.getElementById('yq');
+    const $ = sel => document.querySelector(sel);
+    const statusEl = $('#status');
+    const outEl = $('#out');
+    const yqEl = $('#yq'), yqValEl = $('#yqVal');
+    yqEl.addEventListener('input', ()=> yqValEl.textContent = yqEl.value);
 
-    let RAW = null;    // [{page, items:[{str,x,y,fontName?}]}, ...]
-    let LINES = null;  // [{page, yQuant, lines:[...]}]
-
-    function fmt(obj){ return JSON.stringify(obj, null, 2); }
+    let RAW = [];        // {page, x, y, str}
+    let GROUPED = [];    // {page, yQuant, lines:[...]}
     const norm = s => (s||'').replace(/\s+/g,' ').trim();
 
-    function groupToLines(items, yQuant=2){
-      const rows = new Map();
-      for(const it of items){
-        const key = Math.round(it.y / yQuant) * yQuant;
-        if(!rows.has(key)) rows.set(key, []);
-        rows.get(key).push(it);
-      }
-      const ys = Array.from(rows.keys()).sort((a,b)=> b-a);
-      const out = [];
-      for(const y of ys){
-        const bits = rows.get(y).sort((a,b)=> a.x - b.x).map(b=>b.str);
-        const line = norm(bits.join(' '));
-        if(line) out.push(line);
-      }
-      return out;
+    function download(name, text){
+      const blob = new Blob([text], {type:'application/octet-stream'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name; a.click();
+      URL.revokeObjectURL(url);
     }
 
-    async function readPdf(arrayBuffer){
-      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-      const raw = [];
+    $('#dlRaw').onclick = ()=> download('PDF_RAW_items.json', JSON.stringify(RAW, null, 2));
+    $('#dlGrouped').onclick = ()=> download('PDF_GROUPED_lines.json', JSON.stringify(GROUPED, null, 2));
+    $('#dlGroupedCsv').onclick = ()=>{
+      // CSV per rad: page;line_index;line_text
+      const rows = [];
+      for(const block of GROUPED){
+        block.lines.forEach((line, i)=>{
+          const esc = s => '"' + String(s).replace(/"/g,'""') + '"';
+          rows.push([block.page, i+1, esc(line)].join(';'));
+        });
+      }
+      download('PDF_GROUPED_lines.csv', "page;line;text\n" + rows.join('\n'));
+    };
+
+    async function readPdfArrayBuffer(buf){
+      RAW = []; GROUPED = [];
+      const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      const yQuant = parseInt(yqEl.value, 10);
+
       for(let p=1; p<=pdf.numPages; p++){
         const page = await pdf.getPage(p);
-        const text = await page.getTextContent();
-        const items = text.items.map(it => {
-          const [a,b,c,d,x,y] = it.transform;
-          return { str: it.str, x, y };
-        });
-        raw.push({ page: p, items });
+        const tc = await page.getTextContent();
+        // RAW dump (sort Y desc, X asc)
+        const items = tc.items.map(it => ({
+          page: p,
+          x: +it.transform[4],
+          y: +it.transform[5],
+          str: it.str
+        })).sort((a,b)=> b.y - a.y || a.x - b.x);
+        RAW.push({ page:p, items });
+
+        // GROUPED lines
+        const rows = new Map();
+        for(const it of items){
+          const key = Math.round(it.y / yQuant) * yQuant;
+          if(!rows.has(key)) rows.set(key, []);
+          rows.get(key).push({ x: it.x, str: it.str });
+        }
+        const ys = Array.from(rows.keys()).sort((a,b)=> b-a);
+        const lines = [];
+        for(const y of ys){
+          const bits = rows.get(y).sort((a,b)=> a.x - b.x).map(b=> b.str);
+          const line = norm(bits.join(' '));
+          if(line) lines.push(line);
+        }
+        GROUPED.push({ page:p, yQuant, lines });
       }
-      return raw;
     }
 
-    function buildAllLines(raw, yQuant){
-      const lines = raw.map(pg => ({
-        page: pg.page,
-        yQuant,
-        lines: groupToLines(pg.items, yQuant)
-      }));
-      return lines;
+    function render(){
+      outEl.innerHTML = '';
+      // RAW
+      for(const block of RAW){
+        const det = document.createElement('details');
+        det.open = false;
+        const sum = document.createElement('summary');
+        sum.textContent = `RAW — Sida ${block.page} (items: ${block.items.length})`;
+        det.appendChild(sum);
+
+        const pre = document.createElement('pre');
+        const lines = block.items.map(it =>
+          `p=${it.page}\tx=${it.x.toFixed(3)}\ty=${it.y.toFixed(3)}\t${it.str}`
+        ).join('\n');
+        pre.textContent = lines || '(tomt)';
+        det.appendChild(pre);
+        outEl.appendChild(det);
+      }
+
+      // GROUPED
+      for(const block of GROUPED){
+        const det = document.createElement('details');
+        det.open = false;
+        const sum = document.createElement('summary');
+        sum.textContent = `GROUPED — Sida ${block.page} (yQuant=${block.yQuant}, rader: ${block.lines.length})`;
+        det.appendChild(sum);
+
+        const pre = document.createElement('pre');
+        pre.textContent = block.lines.map((L,i)=> `${String(i+1).padStart(3,' ')}  ${L}`).join('\n') || '(tomt)';
+        det.appendChild(pre);
+        outEl.appendChild(det);
+      }
+
+      statusEl.textContent = `Klar — RAW sidor: ${RAW.length}, GROUPED sidor: ${GROUPED.length}`;
     }
 
-    function renderRaw(raw){
-      // Visa bara första ~200 items per sida så UI inte dör – men exporten tar med allt
-      const preview = raw.map(pg => ({
-        page: pg.page,
-        items: pg.items.slice(0, 200)
-      }));
-      rawBox.textContent = fmt(preview) + (preview.length ? `\n\n// (Visar max 200 items/sida i UI – exporten innehåller ALLT)` : '');
-    }
-
-    function renderLines(lines){
-      const preview = lines.map(pg => ({
-        page: pg.page,
-        yQuant: pg.yQuant,
-        lines: pg.lines.slice(0, 200)
-      }));
-      linesBox.textContent = fmt(preview) + (preview.length ? `\n\n// (Visar max 200 rader/sida i UI – exporten innehåller ALLT)` : '');
-    }
-
-    function downloadJSON(name, dataObj){
-      const blob = new Blob([JSON.stringify(dataObj, null, 2)], {type:'application/json;charset=utf-8;'});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href = url; a.download = name;
-      document.body.appendChild(a); a.click(); URL.revokeObjectURL(url); a.remove();
-    }
-
-    loadBtn.addEventListener('click', async () => {
-      const f = pdfInput.files?.[0];
-      if(!f){ alert('Välj PDF först.'); return; }
-      RAW = null; LINES = null;
-      rawBox.textContent = '// Läser PDF…';
-      linesBox.textContent = '// Vänta…';
-      statusEl.textContent = 'Läser PDF…';
-      exportRawBtn.disabled = true;
-      exportLinesBtn.disabled = true;
-      rebuildBtn.disabled = true;
+    $('#runBtn').addEventListener('click', async ()=>{
+      const f = $('#pdfFile').files[0];
+      if(!f){ alert('Välj en PDF-fil först.'); return; }
+      statusEl.textContent = 'Läser PDF och bygger RAW/GROUPED…';
+      outEl.innerHTML = '';
       try{
-        const buf = await f.arrayBuffer();
-        RAW = await readPdf(buf);
-        renderRaw(RAW);
-        // bygga initiala rader
-        const yq = Math.max(1, parseInt(yqInput.value||'2',10));
-        LINES = buildAllLines(RAW, yq);
-        renderLines(LINES);
-        statusEl.textContent = `Klar — sidor: ${RAW.length}`;
-        exportRawBtn.disabled = false;
-        exportLinesBtn.disabled = false;
-        rebuildBtn.disabled = false;
+        await readPdfArrayBuffer(await f.arrayBuffer());
+        render();
       }catch(err){
         console.error(err);
         statusEl.textContent = 'Fel: ' + err.message;
-        rawBox.textContent = '// Fel: ' + err.message;
-        linesBox.textContent = '// Fel: ' + err.message;
       }
     });
 
-    rebuildBtn.addEventListener('click', () => {
-      if(!RAW) return;
-      const yq = Math.max(1, parseInt(yqInput.value||'2',10));
-      LINES = buildAllLines(RAW, yq);
-      renderLines(LINES);
-    });
-
-    exportRawBtn.addEventListener('click', () => {
-      if(!RAW) return;
-      downloadJSON('PDF_RAW_items.json', RAW);
-    });
-
-    exportLinesBtn.addEventListener('click', () => {
-      if(!LINES) return;
-      downloadJSON('PDF_GROUPED_lines.json', LINES);
-    });
-
-    // Dämpa pdf.js TT-varning
+    // Mindre brus från TT-varning
     try {
       if (pdfjsLib.VerbosityLevel) pdfjsLib.GlobalWorkerOptions.verbosity = pdfjsLib.VerbosityLevel.ERROR;
       const o = console.warn;
