@@ -62,10 +62,10 @@
     const debugEl = document.getElementById('debugLines');
     const exportCsvBtn = document.getElementById('exportCsvBtn');
 
-    const MARKER_ANY = 'Slutlig antagningsstatistik'; // används för att låsa skolnamn
+    const MARKER_ANY = 'Slutlig antagningsstatistik';
     const norm = s => (s||'').replace(/\s+/g,' ').trim();
 
-    // Gruppér pdf.js text items till rader (y/x-klustring)
+    // pdf.js → rader
     function itemsToLines(items){
       const rows = new Map(), yq = 2;
       for(const it of items){
@@ -84,7 +84,7 @@
       return lines;
     }
 
-    // Skolnamn: "<Skola> Slutlig antagningsstatistik ..." eller fristående rad som slutar på -skolan/-gymnasiet
+    // Skolnamn
     function detectSchool(line){
       if(line.includes(MARKER_ANY)){
         const before = line.split(MARKER_ANY)[0].replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö .\-]/g,'').trim();
@@ -96,23 +96,21 @@
       return null;
     }
 
-    // Program (inriktning) – plocka SVANSEN på raden
+    // Programnamn = svansen av raden
     const progRe = /(Programinriktat val mot .*?|Yrkesintro\.\s*mot .*?|[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+?progr\.(?:\s*-\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+)?)$/i;
 
-    // LÄGSTA: ta talen till vänster om programmet och välj "första efter ev. litet heltal"
-    function extractLagsta(leftPart){
-      const nums = Array.from(leftPart.matchAll(/\b\d{1,3}(?:[.,]\d+)?\b/g)).map(m => parseFloat(m[0].replace(',','.')));
-      if(nums.length === 0) return null;
-      // hoppa över första om det ser ut som litet heltal (reserver/platser, typ ≤ 64)
-      let idx = 0;
-      if (Number.isInteger(nums[0]) && nums[0] <= 64 && nums.length >= 2) idx = 1;
-      const cand = nums[idx];
-      return (cand >= 0 && cand <= 340) ? cand : null;
+    // Hämta Lägsta från talen TILL HÖGER om programmet
+    function extractLagstaFromRight(rightText){
+      const nums = Array.from(rightText.matchAll(/\b\d{1,3}(?:[.,]\d+)?\b/g)).map(m => parseFloat(m[0].replace(',','.')));
+      if(nums.length >= 4) return nums[3];          // [platser, förstahand, antagna, LÄGSTA, median?, reserver?]
+      if(nums.length === 3) return nums[2];         // ibland saknas en av de två första
+      if(nums.length === 2) return nums[1];         // ibland bara [något, LÄGSTA]
+      if(nums.length === 1) return nums[0];         // endast LÄGSTA ifyllt
+      return null;
     }
 
     async function parsePdfFromArrayBuffer(buf){
       const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-
       let currentSchool = null;
       const out = [];
       const debugLines = [];
@@ -130,15 +128,14 @@
           const m = line.match(progRe);
           if(m && currentSchool){
             const program = m[0].replace(/\bprogrammet\b/i,'progr.').replace(/\s{2,}/g,' ').trim();
-            const left = line.slice(0, m.index).trim();
-            const lagsta = extractLagsta(left);
+            const right = line.slice(m.index + m[0].length).trim();
+            const lagsta = extractLagstaFromRight(right);
             if (lagsta !== null){
               out.push([currentSchool, program, lagsta]);
             }
           }
         }
       }
-
       debugLines.push(`--- Totalt: ${out.length} rader`);
       debugEl.textContent = debugLines.join('\n');
       return out;
@@ -188,7 +185,7 @@
       }
     });
 
-    // Tysta just TT-varningen
+    // Tysta just TT-varningen (frivilligt)
     try {
       if (pdfjsLib.VerbosityLevel) pdfjsLib.GlobalWorkerOptions.verbosity = pdfjsLib.VerbosityLevel.ERROR;
       const o = console.warn;
