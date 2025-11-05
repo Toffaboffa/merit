@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Slutlig antagning – parser (Örebro 2025)</title>
+  <title>Slutlig antagning – Örebro 2025 (stabil parser)</title>
   <link rel="icon" href="data:," />
   <style>
     :root{ --bg:#0b0f14; --fg:#e7effa; --muted:#94a3b8; --panel:#0f172a; --accent:#22c55e; --border:#1f2937; }
@@ -46,8 +46,8 @@
       <tbody></tbody>
     </table>
 
-    <details open>
-      <summary>Visa debug</summary>
+    <details>
+      <summary>Visa debug (första ~700 rader + matcher)</summary>
       <pre id="debugLines"></pre>
     </details>
   </main>
@@ -64,12 +64,12 @@
     const exportCsvBtn = document.getElementById('exportCsvBtn');
 
     const norm = s => (s||'')
-      .replace(/\u00AD/g,'') // mjukt bindestreck
-      .replace(/[‐-‒–—―]/g,'-') // alla varianter till vanligt -
+      .replace(/\u00AD/g,'')                // mjukt bindestreck
+      .replace(/[‐--–—―]/g,'-')            // alla bindestreck-varianter
       .replace(/\s+/g,' ')
       .trim();
 
-    // Samla rader genom att kvantisera Y och sortera X
+    // PDF → radlistor genom y-kvantisering
     function buildLines(items){
       const rowsByY = new Map(); const yq = 2;
       for(const it of items){
@@ -94,7 +94,7 @@
       return lines;
     }
 
-    // Skolrubriker
+    // Heuristik för skolrad/rubrik
     const SCHOOL_HEADER = /^Slutlig antagningsstatistik för\b/i;
     function extractSchoolFromHeader(line){
       const m = line.match(/^Slutlig antagningsstatistik för\s+(.+?)\s*$/i);
@@ -103,30 +103,40 @@
     const looksLikeSchoolOnly = l =>
       !/\d/.test(l) &&
       /\b(skolan|gymnasiet|gymnasium|Kreativa Gy|Idrottsgym|Praktiska|Realgymnasiet|Rytmus|Affärsgymnasiet|Drottning Blankas Gy|Grillska Gymnasiet|NTI Gymnasiet|Jensen gymnasium|LBS Kreativa Gy|Yrkesgymnasiet|Karlskoga Idrottsgym)\b/i.test(l) &&
-      l.split(/\s+/).length <= 5;
+      l.length <= 60;
 
-    // Koder + tal
-    const CODE = '(AE|DEM|KAM|LS|PI|KA|RU|TU|VI|AFG|DBG|GRI|JGY|LBS|NTI|PRA|PRO|REA|RYT|YRK)';
-    const NUM = '\\d{1,3}(?:[.,]\\d+)?';
-    // Programsegment: programnamn (måste innehålla progr./Programinriktat/Yrkesintro.), sen kod, sen minst 4 tal
-    const ROW_RE = new RegExp(
-      String.raw`((?:[A-Za-zÅÄÖåäö0-9()\/.,–—\- ]*?(?:progr\.|programmet|Programinriktat val|Yrkesintro\.)[A-Za-zÅÄÖåäö0-9()\/.,–—\- ]*?))\s+${CODE}\s+((?:${NUM}\s+){3,}${NUM})`,
-      'gi'
-    );
+    // Startord för att splitta programlistan
+    const STARTERS = [
+      'Bygg- och anläggningsprogr\\.', 'Barn- och fritidsprogr\\.', 'El- och energiprogr\\.',
+      'Ekonomiprogr\\.', 'Estetiska progr\\.', 'Försäljnings- och serviceprogr\\.',
+      'Fordons- och transportprogr\\.', 'Industritekniska progr\\.', 'Naturvetenskapsprogr\\.',
+      'Naturbruksprogr\\.', 'Restaurang- och livsmedelsprogr\\.', 'Samhällsvetenskapsprogr\\.',
+      'Teknikprogr\\.', 'VVS- och fastighetsprogr\\.', 'Yrkesintro\\.',
+      'Programinriktat val', 'IB Preparandår', 'Hotell- och turismprogr\\.', 'Frisör- och stylistprogr\\.', 'Frisör- och stylistprogrammet'
+    ];
+    const START_BOUND = new RegExp('(?:^|\\s)(' + STARTERS.join('|') + ')(?=\\s|$)', 'g');
 
-    function parseRowSegments(line){
-      const out = [];
-      let m;
-      while((m = ROW_RE.exec(line))!==null){
-        const prog = norm(m[1].replace(/\s*-\s*/g,' - '));
-        const code = m[2]; // inte använd – men bra för felsökning
-        const nums = m[3].trim().split(/\s+/).map(v=>parseFloat(v.replace(',','.')));
-        if (nums.length >= 4){
-          const lagsta = nums[3]; // 4:e talet efter koden
-          out.push({ prog, lagsta });
-        }
+    // Hjälpare
+    const CODE_RE = /\b(AE|DEM|KAM|LS|PI|KA|RU|TU|VI|AFG|DBG|GRI|JGY|LBS|NTI|PRA|PRO|REA|RYT|YRK)\b/g;
+    const NUM_RE  = /(\d{1,3}(?:[.,]\d+)?)/g;
+
+    // Parse ett skolblock: kräver program[], lagsta[], (codes optional)
+    function flushSection(acc, school, programs, lagsta, debug){
+      const N = Math.min(programs.length, lagsta.length);
+      if (!school || N===0) return;
+      for(let i=0;i<N;i++){
+        acc.push([school, programs[i], parseFloat(String(lagsta[i]).replace(',','.'))]);
       }
-      return out;
+      debug.push(`  [MATCH] ${N} rader → ${school}`);
+    }
+
+    function splitProgramsFromBuffer(buf){
+      // buf = 1..n rader efter "Studieväg" som innehåller programnamn
+      const joined = buf.join(' ');
+      // Lägg in delimiter före varje startord (utom första)
+      const marked = joined.replace(START_BOUND, '|||$1');
+      const parts = marked.split('|||').map(s=>norm(s)).filter(Boolean);
+      return parts;
     }
 
     async function parsePdfFromArrayBuffer(buf){
@@ -137,58 +147,156 @@
       let currentSchool = null;
       let headerJustSeen = false;
 
+      // Buffers inom block
+      let inPrograms = false;
+      let progBuf = [];
+      let programs = [];
+      let expectCounts = 0;
+
+      let codesBuf = [];
+      let lagstaBuf = [];
+      let collectingLagsta = false;
+
+      function resetBlockState(){
+        inPrograms = false;
+        progBuf = [];
+        programs = [];
+        expectCounts = 0;
+        codesBuf = [];
+        lagstaBuf = [];
+        collectingLagsta = false;
+      }
+
       for(let p=1; p<=pdf.numPages; p++){
         const page = await pdf.getPage(p);
         const text = await page.getTextContent();
         const lines = buildLines(text.items);
 
-        // debug: dumpa lite
-        lines.slice(0,70).forEach(L => { if (debug.length<700) debug.push(L); });
+        lines.slice(0,80).forEach(L => { if (debug.length<700) debug.push(L); });
 
-        for (const L of lines){
-          // Rubrik med skola på samma rad
+        for (const Lraw of lines){
+          const L = Lraw;
+
+          // 1) Skolrubrik
           if (SCHOOL_HEADER.test(L)){
             const name = extractSchoolFromHeader(L);
             if (name){
+              // flush ev föregående block
+              if (currentSchool && programs.length && lagstaBuf.length){
+                flushSection(rows, currentSchool, programs, lagstaBuf, debug);
+              }
               currentSchool = name;
-              headerJustSeen = false;
               debug.push(`[SKOLA] ${currentSchool}`);
+              resetBlockState();
+              continue;
+            } else {
+              // rubrik utan namn → nästa rad bär namnet
+              headerJustSeen = true;
               continue;
             }
-            // Om rubriken utan namn → vänta på nästa rad
-            headerJustSeen = true;
-            continue;
           }
 
-          // Skolnamn på egen rad (efter rubrik)
+          // 2) Skolnamn på separat rad efter rubrik
           if (headerJustSeen && looksLikeSchoolOnly(L)){
+            if (currentSchool && programs.length && lagstaBuf.length){
+              flushSection(rows, currentSchool, programs, lagstaBuf, debug);
+            }
             currentSchool = norm(L);
-            headerJustSeen = false;
             debug.push(`[SKOLA] ${currentSchool}`);
+            resetBlockState();
+            headerJustSeen = false;
             continue;
           }
 
-          // Ensam skolrad någon annanstans
-          if (looksLikeSchoolOnly(L)){
+          // Fångar även fristående “ensam skolrad” (PDF flödar ibland om)
+          if (!headerJustSeen && looksLikeSchoolOnly(L) && !/Studieväg/i.test(L)){
+            if (currentSchool && programs.length && lagstaBuf.length){
+              flushSection(rows, currentSchool, programs, lagstaBuf, debug);
+            }
             currentSchool = norm(L);
-            headerJustSeen = false;
             debug.push(`[SKOLA] ${currentSchool}`);
+            resetBlockState();
             continue;
           }
 
-          // Tabellrader: program + kod + tal (kan finnas flera på samma rad)
-          const segs = parseRowSegments(L);
-          if (segs.length){
-            if (!currentSchool){
-              debug.push('  [WARN] Programrad utan skola → hoppar');
+          if (!currentSchool) continue; // vi väntar på skolstart
+
+          // 3) Start programtabell
+          if (/^Studieväg$/i.test(L)){
+            inPrograms = true;
+            progBuf = [];
+            programs = [];
+            codesBuf = [];
+            lagstaBuf = [];
+            collectingLagsta = false;
+            continue;
+          }
+
+          // 4) Samla programnamn (kan ligga på 1–3 rader)
+          if (inPrograms){
+            // Stoppvillkor för programlistan
+            if (/^Antal platser$/i.test(L) || /^Antal första/i.test(L) || /^Antal antagna$/i.test(L) || /^Lägsta jämförelsetal$/i.test(L) || CODE_RE.test(L) || /^\d[\d\s.,]*$/.test(L)){
+              // stäng programinsamling, splitta
+              if (!programs.length){
+                programs = splitProgramsFromBuffer(progBuf);
+              }
+              inPrograms = false;
+              // Fortsätt tolka raden igen i “normal” logik (den kan vara Antal platser, Lägsta, eller kodrad)
+              // fall-through (ingen continue)
+            } else {
+              progBuf.push(L);
               continue;
             }
-            for (const s of segs){
-              rows.push([currentSchool, s.prog, s.lagsta]);
-            }
-            debug.push(`  [MATCH] ${segs.length} rader → ${currentSchool}`);
           }
+
+          // 5) Antal platser → efterföljande rad(er) med koder
+          if (/^Antal platser$/i.test(L)){
+            codesBuf = []; // nollställ
+            continue;
+          }
+          // Kodrad: består nästan bara av koder
+          if ((L.match(CODE_RE)||[]).length >= 1 && L.replace(CODE_RE,'').trim().length <= 10){
+            codesBuf.push(...(L.match(CODE_RE)||[]));
+            continue;
+          }
+
+          // 6) Lägsta jämförelsetal → samla tal tills vi når programlängden
+          if (/^Lägsta jämförelsetal$/i.test(L)){
+            collectingLagsta = true;
+            lagstaBuf = [];
+            continue;
+          }
+          if (collectingLagsta){
+            const nums = (L.match(NUM_RE)||[]).map(v=>v.replace(',','.'));
+            lagstaBuf.push(...nums);
+            // Om vi inte vet antal program än (p.g.a. svår splitt) – försök splitta nu
+            if (!programs.length && progBuf.length){
+              programs = splitProgramsFromBuffer(progBuf);
+            }
+            if (programs.length && lagstaBuf.length >= programs.length){
+              // Sanity: om vi har koder och deras antal ≠ programlängd, försök justera
+              if (codesBuf.length && codesBuf.length !== programs.length){
+                // Om koderna är fler, trunkera till programlängd
+                codesBuf = codesBuf.slice(0, programs.length);
+              }
+              // Flush en komplett sektion
+              flushSection(rows, currentSchool, programs, lagstaBuf, debug);
+              // Reset för resterande block i samma skola
+              programs = [];
+              progBuf = [];
+              lagstaBuf = [];
+              collectingLagsta = false;
+            }
+            continue;
+          }
+
+          // 7) Ny skola kan komma igen senare – redan hanterat ovan
         }
+      }
+
+      // Flush sista hängande blocket om komplett
+      if (currentSchool && programs.length && lagstaBuf.length){
+        flushSection(rows, currentSchool, programs, lagstaBuf, debug);
       }
 
       debug.push(`--- Totalt extraherade rader: ${rows.length}`);
