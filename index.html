@@ -97,18 +97,41 @@
 
     const SCHOOL_HEADER = /^Slutlig antagningsstatistik för\b/i;
 
-    // fånga även “Praktiska”, “Kreativa Gy”, “Idrottsgym”, “musikgymnasiu”, etc.
-    const BARE_SCHOOL_RE = /\b(gymnasiet|gymnasium|Idrottsgym|Kreativa Gy|Praktiska|NTI Gymnasiet|Yrkesgymnasiet|Kreativa\s+Gy|Rytmus|musikgymnasiu|Drottning Blankas Gy|Affärsgymnasiet|Grillska Gymnasiet|Karolinska gymnasiet|Rudbecksgymnasiet|Tullängsgymnasiet|Virginska gymnasiet|LBS Kreativa Gy)\b/i;
+    // Fånga *både* gymnasier och kommunala "…skolan" samt vanliga fristående namn
+    const BARE_SCHOOL_RE = new RegExp(
+      String.raw`\b(` +
+      [
+        `gymnasiet`,`gymnasium`,`gymnasiu`, // ibland trasig OCR
+        `skolan`,                           // Alléskolan, Lindeskolan, Pihlskolan …
+        `Praktiska`,`NTI Gymnasiet`,`Yrkesgymnasiet`,`Kreativa\\s+Gy`,
+        `Rytmus`,`Drottning Blankas Gy`,`Affärsgymnasiet`,`Grillska Gymnasiet`,
+        `Karolinska gymnasiet`,`Rudbecksgymnasiet`,`Tullängsgymnasiet`,
+        `Virginska gymnasiet`,`LBS Kreativa Gy`,`Möckelngymnasiet`,
+        `Degerforsgymnasiet`
+      ].join(`|`)
+      + `)\\b`, 'i'
+    );
 
     function isSchoolHeader(line){ return SCHOOL_HEADER.test(line); }
-    function extractSchoolFromHeader(line){ return norm(line.replace(SCHOOL_HEADER,'').replace(/^för\s+/i,'').replace(/^:?\s*/,'').trim()); }
+    function extractSchoolFromHeader(line){
+      return norm(line.replace(SCHOOL_HEADER,'').replace(/^för\s+/i,'').replace(/^:?\s*/,''));
+    }
     function maybeBareSchool(line){
-      if(!BARE_SCHOOL_RE.test(line)) return null;
-      // skydda mot rader som samtidigt innehåller siffror/labels
-      if (/\d/.test(line) || LAB_ANY.test(line)) return null;
-      // ofta står skolan som en ensam rad
+      if (/\d/.test(line)) return null;
+      const words = line.trim().split(/\s+/);
+      if (words.length===0 || words.length>5) return null;
+      if (!BARE_SCHOOL_RE.test(line)) return null;
+      if (/^(stv\.|period\b|Kommunala|Fristående)/i.test(line)) return null;
       return norm(line);
     }
+
+    // ——— “kods-matta” (AE/DEM/KAM/…) → nästa rad är skolan ———
+    const CODE_RE = /^(?:AE|DEM|KAM|LS|PI|KA|RU|TU|VI|AFG|DBG|GRI|JGY|LBS|NTI|PRA|PRO|REA|RYT|YRK)$/;
+    const isCodeMatta = l => {
+      const bits = l.trim().split(/\s+/);
+      if (bits.length < 6) return false;
+      return bits.every(b => CODE_RE.test(b));
+    };
 
     // ——— numbers ———
     const NUM_RE = /(?<!\d)\d{1,3}(?:[.,]\d+)?(?!\d)/g;
@@ -117,34 +140,27 @@
     // ——— program splitting ———
     function normalizeProgramLine(L){
       return L
-        .replace(/\s*-\s*/g,' - ')                // jämnare bindestreck
-        .replace(/\s*\.\s*/g,'. ')                // punkt + mellanslag
+        .replace(/\s*-\s*/g,' - ')
+        .replace(/\s*\.\s*/g,'. ')
         .replace(/\s{2,}/g,' ')
         .trim();
     }
 
-    // splitta tryggt vid nästa start: efter “progr.” om nästa token börjar med stor bokstav / Programinriktat / Yrkesintro.
     function splitPrograms(line){
       const s = normalizeProgramLine(line);
       if(!/(progr\.|Programinriktat val|Yrkesintro\.)/i.test(s)) return [];
-
-      // steg 1: grov split på “progr.”-gränser
+      // grov split på “progr.”-gränser
       let parts = s.split(/(?<=progr\.)\s+(?=(Programinriktat|Yrkesintro\.|[A-ZÅÄÖ]))/g);
-
-      // steg 2: expandera om en part i sin tur innehåller fler ankare
       const out = [];
       for(const p of parts){
-        // styckas även om flera "Programinriktat val ..." finns
         const sub = p.split(/(?<=\.)(?=\s*(Programinriktat val|Yrkesintro\.))/g);
         for(const q of sub){
           const t = q.trim();
           if(!t) continue;
-          // behåll “progr. - Inriktning …” i samma del
           out.push(t);
         }
       }
-
-      // steg 3: kasta rena bruskandidater
+      // rensa brus
       return out.filter(x=>
         /(Programinriktat val|Yrkesintro\.|progr\.)/i.test(x) &&
         !/^(AE|DEM|KAM|LS|PI|KA|RU|TU|VI|AFG|DBG|GRI|JGY|LBS|NTI|PRA|PRO|REA|RYT|YRK)(\s|$)/.test(x)
@@ -159,8 +175,7 @@
       let currentSchool = null;
       let collectingLagsta = false;
       let lagstaQueue = [];
-
-      const flushLagsta = () => { collectingLagsta = false; lagstaQueue = []; };
+      let expectSchoolAfterCodes = false;
 
       for(let p=1; p<=pdf.numPages; p++){
         const page = await pdf.getPage(p);
@@ -170,24 +185,47 @@
         lines.slice(0,80).forEach(L => { if (debug.length<600) debug.push(L); });
 
         for(let i=0;i<lines.length;i++){
-          const Lraw = lines[i];
-          const L = Lraw;
+          const L = lines[i];
+
+          // kod-matta → nästa rad är sannolikt skolnamnet
+          if (isCodeMatta(L)) {
+            expectSchoolAfterCodes = true;
+            continue;
+          }
+
+          if (expectSchoolAfterCodes) {
+            const maybeName = maybeBareSchool(L);
+            if (maybeName) {
+              currentSchool = maybeName;
+              expectSchoolAfterCodes = false;
+              lagstaQueue = [];
+              collectingLagsta = false;
+              debug.push(`[SKOLA] ${currentSchool}`);
+              continue;
+            }
+            // om inte skolrad: låt flaggan vara kvar, fortsätt
+          }
 
           // skol-header på en rad
           if(isSchoolHeader(L)){
             const name = extractSchoolFromHeader(L);
             if(name){
               currentSchool = name;
-              flushLagsta();
+              expectSchoolAfterCodes = false;
+              lagstaQueue = [];
+              collectingLagsta = false;
               debug.push(`[SKOLA] ${currentSchool}`);
               continue;
             }
           }
-          // bar skolrad (t.ex. “Praktiska”, “LBS Kreativa Gy”, “Rytmus musikgymnasiu”)
+
+          // bar skolrad (inkl. “…skolan”)
           const bare = maybeBareSchool(L);
           if(bare){
             currentSchool = bare;
-            flushLagsta();
+            expectSchoolAfterCodes = false;
+            lagstaQueue = [];
+            collectingLagsta = false;
             debug.push(`[SKOLA] ${currentSchool}`);
             continue;
           }
@@ -208,19 +246,26 @@
           if(collectingLagsta){
             const nums = getNums(L);
             if(nums.length) lagstaQueue.push(...nums);
-            // sluta om blockkod eller ny skola dyker upp på samma “tavla”
-            if(/^(?:AE|DEM|KAM|LS|PI|KA|RU|TU|VI|AFG|DBG|GRI|JGY|LBS|NTI|PRA|PRO|REA|RYT|YRK)(?:\s+|$)/.test(L) || isSchoolHeader(L) || maybeBareSchool(L)){
+            // stäng sektionen vid kod-matta eller ny skola
+            if(isCodeMatta(L) || isSchoolHeader(L) || maybeBareSchool(L)){
               collectingLagsta = false;
             }
             continue;
           }
 
-          // programrader – ibland är de på 1–2 rader; vi försöker suga upp “grannraden” om den fortsätter med programankare
+          // programrader – sug ev. upp nästa rad om den fortsätter listan
           let progLine = null;
           if (/(Programinriktat val|Yrkesintro\.|progr\.)/i.test(L)){
             progLine = L;
             const nxt = lines[i+1] || '';
-            if(/^(?:-|\w)/.test(nxt) && /(Programinriktat val|Yrkesintro\.|progr\.)/i.test(nxt) && !LAB_ANY.test(nxt)){
+            if (
+              nxt &&
+              !LAB_ANY.test(nxt) &&
+              !isSchoolHeader(nxt) &&
+              !maybeBareSchool(nxt) &&
+              !isCodeMatta(nxt) &&
+              /(Programinriktat val|Yrkesintro\.|progr\.)/i.test(nxt)
+            ){
               progLine += ' ' + nxt;
             }
           }
@@ -231,7 +276,6 @@
               continue;
             }
             if(!lagstaQueue.length){
-              // program före “Lägsta” – hoppa, vi väntar på siffrorna
               debug.push(`  [WARN] Program men inga LÄGSTA i kö → väntar`);
               continue;
             }
@@ -247,7 +291,6 @@
             lagstaQueue = lagstaQueue.slice(n);
             debug.push(`  [MATCH] ${n} rader → ${currentSchool}`);
           }
-
         }
       }
 
