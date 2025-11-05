@@ -88,7 +88,6 @@
       return lines;
     }
 
-    // Skolnamn: (1) “<Skola> Slutlig antagningsstatistik …”, (2) fristående skolrad (Alléskolan)
     function detectSchool(line){
       if(line.includes(MARKER_ANY)){
         const before = line.split(MARKER_ANY)[0].trim();
@@ -102,7 +101,6 @@
       return null;
     }
 
-    // Rensa PDF-artefakter (delade ord som “oc h”)
     function fixSplits(s){
       return (s||'').replace(/\u00AD/g,'')
                      .replace(/\boc h\b/gi,'och')
@@ -111,7 +109,6 @@
                      .trim();
     }
 
-    // Dela ut alla program från ett sammanslaget Studieväg-block
     function extractProgramsFromStudievag(text){
       const t = fixSplits(text);
       const hits = [];
@@ -134,7 +131,6 @@
       return hits;
     }
 
-    // Samla meritvärden efter “Lägsta jämförelsetal”
     function collectMerits(lines, startIdx){
       const vals = [];
       for(let i=startIdx+1; i<lines.length; i++){
@@ -146,6 +142,13 @@
         vals.push(...nums);
       }
       return vals;
+    }
+
+    // Heuristik: rad ser ut som en sammanslagen programrad (utan att vi sett "Studieväg" ännu)
+    function looksLikeProgramBlob(line){
+      const t = (line||'').toLowerCase();
+      const count = (t.match(/progr\./g)||[]).length + (t.match(/yrkesintro\./g)||[]).length;
+      return count >= 2; // minst två träffar tyder på "hela raden = programlista"
     }
 
     async function parsePdfFromArrayBuffer(buf){
@@ -180,24 +183,27 @@
         }
 
         for(let i=0;i<lines.length;i++){
-          const raw = lines[i];
-          const line = norm(raw);
+          const line = norm(lines[i]);
 
-          // Upptäck skolnamn
           const maybe = detectSchool(line);
           if(maybe){
-            // Om vi redan har samlat data för föregående skola → flush
             if(currentSchool && (programs.length || merits.length)) flush();
-            pendingSchool = maybe; // sätt temporärt (aktualiseras när vi ser MARKER_ANY)
+            pendingSchool = maybe;
           }
           if(line.includes(MARKER_ANY)){
-            // Bekräfta skolnamn (hanterar fallet där skolan står på raden ovan)
             currentSchool = pendingSchool || currentSchool;
           }
 
-          // Studieväg-blocket: samla programtext
+          // 1) Om "Studieväg" hittas: samla program både bakåt och framåt
           if(line.startsWith(STUDIEVAG)){
             let block = '';
+
+            // BAKÅT: ta upp till 5 rader bakåt som ser ut som programblob
+            for(let k=i-1; k>=0 && k>=i-5; k--){
+              const L = lines[k];
+              if(looksLikeProgramBlob(L)) block = L + ' ' + block;
+            }
+            // FRAMÅT: fortsätt som förut
             for(let j=i+1; j<lines.length; j++){
               const L = lines[j];
               if(/Antal|Medianvärde|Lägsta jämförelsetal|Sydnärkes|Studieväg|Slutlig antagningsstatistik/i.test(L)) break;
@@ -210,6 +216,12 @@
             if(extracted.length) programs.push(...extracted);
           }
 
+          // 2) Fallback: ensam rad som redan är en lång programlista
+          else if(looksLikeProgramBlob(line)){
+            const extracted = extractProgramsFromStudievag(line);
+            if(extracted.length) programs.push(...extracted);
+          }
+
           // Merit-blocket
           if(line.startsWith(LOWEST_HDR)){
             const vals = collectMerits(lines, i);
@@ -217,7 +229,6 @@
           }
         }
       }
-      // Sista skolan
       if(currentSchool && (programs.length || merits.length)) flush();
 
       debugEl.textContent = debugLines.join('\n');
@@ -240,18 +251,15 @@
       exportCsvBtn.onclick = () => exportCSV(rows);
     }
 
-    // Svensk CSV: semikolon + decimalkomma
     function exportCSV(rows){
       const header = ['Skola','Inriktning','Lägsta Merit'];
       const esc = (s) => `"${String(s).replace(/"/g,'""')}"`;
       const fmtNumSV = (v) => (typeof v === 'number' ? String(v).replace('.', ',') : String(v));
       const delimiter = ';';
-
       const body = rows.map(([skola, inr, lag]) =>
         [esc(skola), esc(inr), esc(fmtNumSV(lag))].join(delimiter)
       );
       const csv = [header.map(esc).join(delimiter), ...body].join('\n');
-
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -279,11 +287,16 @@
       }
     });
 
-    // Tysta pdf.js-varningar (failsafe)
+    // Tysta pdf.js-varningar (frivilligt)
     try {
       if (pdfjsLib.VerbosityLevel) {
         pdfjsLib.GlobalWorkerOptions.verbosity = pdfjsLib.VerbosityLevel.ERROR;
       }
+      const origWarn = console.warn;
+      console.warn = (...args) => {
+        if (String(args[0]||'').includes('TT: undefined function')) return;
+        origWarn(...args);
+      };
     } catch {}
   </script>
 </body>
