@@ -3,52 +3,56 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Slutlig antagning – parser (filuppladdning)</title>
+  <title>PDF Debug Viewer (råitems + grupperade rader)</title>
   <link rel="icon" href="data:," />
   <style>
     :root{ --bg:#0b0f14; --fg:#e7effa; --muted:#94a3b8; --panel:#0f172a; --accent:#22c55e; --border:#1f2937; }
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
-    header{padding:16px 20px;background:#0f172a;border-bottom:1px solid var(--border)}
-    main{max-width:1100px;margin:0 auto;padding:20px}
-    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+    header{padding:12px 16px;border-bottom:1px solid var(--border);background:#0f172a;position:sticky;top:0;z-index:5}
+    .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
     input[type=file]{flex:1;min-width:260px;padding:10px;border-radius:10px;border:1px solid var(--border);background:#0f172a;color:var(--fg)}
-    button{padding:10px 14px;border-radius:10px;border:0;background:var(--accent);color:#05280f;font-weight:700;cursor:pointer}
+    button{padding:10px 12px;border-radius:10px;border:0;background:var(--accent);color:#05280f;font-weight:700;cursor:pointer}
     button:disabled{opacity:.5;cursor:not-allowed}
-    table{width:100%;border-collapse:collapse;margin-top:20px;background:#0f172a;border:1px solid var(--border);border-radius:12px;overflow:hidden}
-    th,td{padding:10px;border-bottom:1px solid var(--border);text-align:left;font-size:14px}
-    th{background:#0d1326;position:sticky;top:112px}
-    tr:hover td{background:#0c1222}
     .muted{color:var(--muted)}
-    details{margin-top:14px}
-    pre{white-space:pre-wrap;font-size:12px;background:#0f172a;border:1px solid var(--border);padding:10px;border-radius:8px;max-height:360px;overflow:auto}
-    .toolbar{display:flex;gap:8px;margin-top:10px}
+    main{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:1400px;margin:0 auto;padding:12px}
+    section{background:#0f172a;border:1px solid var(--border);border-radius:12px;overflow:hidden}
+    h2{margin:0;padding:10px 12px;background:#0d1326;border-bottom:1px solid var(--border);font-size:14px}
+    .tools{display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)}
+    .tools label{font-size:12px;color:var(--muted)}
+    pre{margin:0;padding:10px 12px;white-space:pre-wrap;max-height:70vh;overflow:auto;font-size:12px}
+    .pill{background:#091020;border:1px solid var(--border);padding:4px 8px;border-radius:999px}
   </style>
 </head>
 <body>
   <header>
     <div class="row">
       <input id="pdfFile" type="file" accept="application/pdf" />
-      <button id="parseFileBtn">Skapa lista från fil</button>
+      <button id="loadBtn">Läs in</button>
       <span id="status" class="muted"></span>
-    </div>
-    <div class="toolbar">
-      <button id="exportCsvBtn" disabled>Exportera CSV</button>
-      <small class="muted">Resultat: <b>Skola</b> · <b>Inriktning</b> · <b>Lägsta Merit</b></small>
+      <span class="pill muted">Inget parsande. Endast debug.</span>
     </div>
   </header>
 
   <main>
-    <table id="outTable" hidden>
-      <thead>
-        <tr><th>Skola</th><th>Inriktning</th><th>Lägsta Merit</th></tr>
-      </thead>
-      <tbody></tbody>
-    </table>
+    <section>
+      <h2>Råa text-items (per sida)</h2>
+      <div class="tools">
+        <button id="exportRawBtn" disabled>Exportera RAW.json</button>
+      </div>
+      <pre id="rawBox">// RAW kommer här…</pre>
+    </section>
 
-    <details>
-      <summary>Visa debug (första ~150 byggda rader)</summary>
-      <pre id="debugLines"></pre>
-    </details>
+    <section>
+      <h2>Grupperade rader (y-kvantisering)</h2>
+      <div class="tools">
+        <label>y-quantize:
+          <input id="yq" type="number" step="1" min="1" value="2" style="width:70px;margin-left:6px">
+        </label>
+        <button id="rebuildBtn" disabled>Bygg rader igen</button>
+        <button id="exportLinesBtn" disabled>Exportera LINES.json</button>
+      </div>
+      <pre id="linesBox">// Rader kommer här…</pre>
+    </section>
   </main>
 
   <script type="module">
@@ -57,237 +61,135 @@
     pdfjsLib.GlobalWorkerOptions.workerPort = worker;
 
     const statusEl = document.getElementById('status');
-    const outTable = document.getElementById('outTable');
-    const tbody = outTable.querySelector('tbody');
-    const debugEl = document.getElementById('debugLines');
-    const exportCsvBtn = document.getElementById('exportCsvBtn');
+    const pdfInput = document.getElementById('pdfFile');
+    const loadBtn = document.getElementById('loadBtn');
+    const rebuildBtn = document.getElementById('rebuildBtn');
+    const exportRawBtn = document.getElementById('exportRawBtn');
+    const exportLinesBtn = document.getElementById('exportLinesBtn');
+    const rawBox = document.getElementById('rawBox');
+    const linesBox = document.getElementById('linesBox');
+    const yqInput = document.getElementById('yq');
 
-    const MARKER_ANY = 'Slutlig antagningsstatistik';
+    let RAW = null;    // [{page, items:[{str,x,y,fontName?}]}, ...]
+    let LINES = null;  // [{page, yQuant, lines:[...]}]
+
+    function fmt(obj){ return JSON.stringify(obj, null, 2); }
     const norm = s => (s||'').replace(/\s+/g,' ').trim();
 
-    // pdf.js → rader
-    function itemsToLines(items){
-      const rows = new Map(), yq = 2;
+    function groupToLines(items, yQuant=2){
+      const rows = new Map();
       for(const it of items){
-        const [ , , , , x, y ] = it.transform;
-        const key = Math.round(y / yq) * yq;
+        const key = Math.round(it.y / yQuant) * yQuant;
         if(!rows.has(key)) rows.set(key, []);
-        rows.get(key).push({ x, str: it.str });
+        rows.get(key).push(it);
       }
       const ys = Array.from(rows.keys()).sort((a,b)=> b-a);
-      const lines = [];
+      const out = [];
       for(const y of ys){
         const bits = rows.get(y).sort((a,b)=> a.x - b.x).map(b=>b.str);
         const line = norm(bits.join(' '));
-        if(line) lines.push(line);
+        if(line) out.push(line);
       }
-      return lines;
-    }
-
-    // Skolnamn
-    function detectSchool(line){
-      if(line.includes(MARKER_ANY)){
-        const before = line.split(MARKER_ANY)[0].replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö .\-]/g,'').trim();
-        if(before) return before;
-      }
-      // Även ensamma skolrader som "Alléskolan"
-      if(/(skolan|gymnasiet|gymnasium)\.?$/i.test(line) && !/\d/.test(line) && line.length <= 60){
-        return line.trim();
-      }
-      return null;
-    }
-
-    // Programnamn = svansen
-    const progRe = /(Programinriktat val mot .*?|Yrkesintro\.\s*mot .*?|[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+?progr\.(?:\s*-\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+)?)$/i;
-
-    // Heuristik: koder som "AE", "DEM", "KAM", "LS", "PI", "KA", "RU", "TU", "VI", "AFG", "DBG", "GRI", "JGY", "LBS", "NTI", "PRA", "PRO", "REA", "RYT", "YRK", "KID", ...
-    const codeRe = /\b[A-ZÅÄÖ]{2,3}\b/;
-
-    // Delar upp ihopklistrade tal (t.ex. "185172" → "185 1 72")
-    function splitStuckNumbers(s){
-      // Sätt mellanslag mellan siffror och bokstav (t.ex. "172AE" → "172 AE")
-      s = s.replace(/(\d)([A-ZÅÄÖ])/g,'$1 $2');
-
-      // Splitta jättelånga sifferklumpar i plausibla grupper
-      // Ex: 185172 → 185 1 72  |  2503125 → 250 3 125
-      s = s.replace(/\b(\d{5,7})\b/g, (m) => {
-        // försök "… 1 2" eller "… 0 2" i slutet, annars sista 2–3 som FH och resten reserver/L/M
-        const n = m.length;
-        if(n === 5)  return m.slice(0,3) + ' ' + m.slice(3,4) + ' ' + m.slice(4);
-        if(n === 6)  return m.slice(0,3) + ' ' + m.slice(3,4) + ' ' + m.slice(4);
-        if(n === 7)  return m.slice(0,3) + ' ' + m.slice(3,5) + ' ' + m.slice(5);
-        return m;
-      });
-
-      // Se till att separera dubbla decimaler: "212.5185" → "212.5 185"
-      s = s.replace(/(\d+\.\d{1,2})(\d{2,3})\b/g, '$1 $2');
-
-      return s;
-    }
-
-    // Hämta alla tal i sträng (komma eller punkt)
-    const numRe = /\b\d{1,3}(?:[.,]\d+)?\b/g;
-    const nums = (s) => Array.from((s||'').matchAll(numRe)).map(m => parseFloat(m[0].replace(',','.')));
-
-    // Välj LÄGSTA ur “tal före KOD” enligt denna PDF-layout:
-    // [Antagna, Lägsta, Median, Reserver, (möjl. Förstahand)] → vi tar "Lägsta" = index 1 bland de sista 4–5 talen.
-    function pickLagstaFromLeft(leftStr){
-      const arr = nums(leftStr);
-      if(arr.length >= 4){
-        const last4 = arr.slice(-5); // ta upp till 5, för säkerhets skull
-        // heuristik: hitta sekvensen där ett rimligt “antagna” (heltal 0–200) följs av ett “poäng-tal” (0–340, ofta .0/.25/.5/.75)
-        // enklast: ta näst sista “stora” poängkandidat i last4-blocket
-        // Men bäst: position 1 i blocket [A,L,M,R,(FH?)] från vänster inom last4/5.
-        // Om vi har 5 → anta [FH, A, L, M, R]; om 4 → [A, L, M, R].
-        if(last4.length === 5) return last4[2]; // L
-        return last4[1]; // L när 4 värden
-      }
-      if(arr.length === 3){
-        // ibland saknas FH eller R → anta [A,L,M]
-        return arr[1];
-      }
-      if(arr.length === 2){
-        // [A,L] – ta #2
-        return arr[1];
-      }
-      if(arr.length === 1){
-        // Endast ett poängtal → ta det
-        return arr[0];
-      }
-      return null;
-    }
-
-    function cleanProgramName(s){
-      return s
-        .replace(/\bprogrammet\b/i,'progr.')
-        .replace(/^\s*-\s*/,'') // ta bort inledande " - "
-        .replace(/\s{2,}/g,' ')
-        .trim();
-    }
-
-    async function parsePdfFromArrayBuffer(buf){
-      const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-      let currentSchool = null;
-      const out = [];
-      const debugLines = [];
-
-      for(let p=1; p<=pdf.numPages; p++){
-        const page = await pdf.getPage(p);
-        const textContent = await page.getTextContent();
-        let lines = itemsToLines(textContent.items);
-
-        for(const L of lines){ if (debugLines.length < 150) debugLines.push(L); }
-
-        // Förhandsfix: separera ihopkladdade nummer/bokstavsgränser
-        lines = lines.map(splitStuckNumbers);
-
-        for(const raw of lines){
-          const line = norm(raw);
-
-          const sch = detectSchool(line);
-          if (sch) { currentSchool = sch; continue; }
-          if (!currentSchool) continue;
-
-          const mProg = line.match(progRe);
-          if(!mProg) continue;
-
-          // Delar upp i: LEFT | PROGRAM (svansen)
-          const prog = cleanProgramName(mProg[0]);
-          const left = norm(line.slice(0, mProg.index));
-
-          // Hitta skolkod strax före programmet (i LEFT-änden)
-          // Vi letar “... [tal/tal]  KOD  [platser]” i slutet av LEFT
-          // Ta sista KOD i LEFT:
-          const leftParts = left.split(/\s+/);
-          let codeIdx = -1;
-          for(let i=leftParts.length-1; i>=0; i--){
-            if(codeRe.test(leftParts[i])){ codeIdx = i; break; }
-          }
-          if(codeIdx === -1){
-            // inget KOD → hoppa ändå, men försök ändå plocka LÄGSTA ur hela LEFT
-            const lag = pickLagstaFromLeft(left);
-            if(lag !== null) out.push([currentSchool, prog, lag]);
-            continue;
-          }
-
-          // Antal platser = tokenen direkt efter KOD (om siffra)
-          const code = leftParts[codeIdx];
-          const seats = (codeIdx+1 < leftParts.length && /^\d+$/.test(leftParts[codeIdx+1]))
-                        ? parseInt(leftParts[codeIdx+1],10) : null;
-
-          // LEFT-OF-CODE = allt före KOD-token → används för att hämta “Lägsta”
-          const leftOfCode = leftParts.slice(0, codeIdx).join(' ');
-          const lagsta = pickLagstaFromLeft(leftOfCode);
-
-          if(lagsta !== null){
-            out.push([currentSchool, prog, lagsta]);
-          }
-        }
-      }
-
-      debugLines.push(`--- Totalt: ${out.length} rader`);
-      debugEl.textContent = debugLines.join('\n');
       return out;
     }
 
-    function renderRows(rows){
-      tbody.innerHTML = '';
-      // Släng dubbletter (PDF kan ha dubblerade block)
-      const key = r => r[0]+'||'+r[1];
-      const seen = new Set();
-      const unique = [];
-      for(const r of rows){
-        const k = key(r);
-        if(seen.has(k)) continue;
-        seen.add(k);
-        unique.push(r);
+    async function readPdf(arrayBuffer){
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      const raw = [];
+      for(let p=1; p<=pdf.numPages; p++){
+        const page = await pdf.getPage(p);
+        const text = await page.getTextContent();
+        const items = text.items.map(it => {
+          const [a,b,c,d,x,y] = it.transform;
+          return { str: it.str, x, y };
+        });
+        raw.push({ page: p, items });
       }
-
-      // Sortera
-      unique.sort((a,b)=> (a[0]===b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
-
-      for(const [skola,inr,lag] of unique){
-        const tr = document.createElement('tr');
-        const td1 = document.createElement('td'); td1.textContent = skola; tr.appendChild(td1);
-        const td2 = document.createElement('td'); td2.textContent = inr;   tr.appendChild(td2);
-        const td3 = document.createElement('td'); td3.textContent = String(lag).replace('.',','); tr.appendChild(td3);
-        tbody.appendChild(tr);
-      }
-      outTable.hidden = false;
-      statusEl.textContent = `Klar — ${unique.length} rader`;
-      exportCsvBtn.disabled = unique.length === 0;
-      exportCsvBtn.onclick = () => exportCSV(unique);
+      return raw;
     }
 
-    // Svensk CSV
-    function exportCSV(rows){
-      const header = ['Skola','Inriktning','Lägsta Merit'];
-      const esc = (s) => `"${String(s).replace(/"/g,'""')}"`;
-      const fmt = (v) => (typeof v === 'number' ? String(v).replace('.', ',') : String(v));
-      const delimiter = ';';
-      const body = rows.map(([a,b,c]) => [esc(a), esc(b), esc(fmt(c))].join(delimiter));
-      const csv = [header.map(esc).join(delimiter), ...body].join('\n');
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    function buildAllLines(raw, yQuant){
+      const lines = raw.map(pg => ({
+        page: pg.page,
+        yQuant,
+        lines: groupToLines(pg.items, yQuant)
+      }));
+      return lines;
+    }
+
+    function renderRaw(raw){
+      // Visa bara första ~200 items per sida så UI inte dör – men exporten tar med allt
+      const preview = raw.map(pg => ({
+        page: pg.page,
+        items: pg.items.slice(0, 200)
+      }));
+      rawBox.textContent = fmt(preview) + (preview.length ? `\n\n// (Visar max 200 items/sida i UI – exporten innehåller ALLT)` : '');
+    }
+
+    function renderLines(lines){
+      const preview = lines.map(pg => ({
+        page: pg.page,
+        yQuant: pg.yQuant,
+        lines: pg.lines.slice(0, 200)
+      }));
+      linesBox.textContent = fmt(preview) + (preview.length ? `\n\n// (Visar max 200 rader/sida i UI – exporten innehåller ALLT)` : '');
+    }
+
+    function downloadJSON(name, dataObj){
+      const blob = new Blob([JSON.stringify(dataObj, null, 2)], {type:'application/json;charset=utf-8;'});
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href = url; a.download = 'antagning_orebro_2025.csv';
+      const a = document.createElement('a'); a.href = url; a.download = name;
       document.body.appendChild(a); a.click(); URL.revokeObjectURL(url); a.remove();
     }
 
-    document.getElementById('parseFileBtn').addEventListener('click', async () => {
-      const f = document.getElementById('pdfFile').files[0];
-      if(!f){ alert('Välj en PDF-fil först.'); return; }
+    loadBtn.addEventListener('click', async () => {
+      const f = pdfInput.files?.[0];
+      if(!f){ alert('Välj PDF först.'); return; }
+      RAW = null; LINES = null;
+      rawBox.textContent = '// Läser PDF…';
+      linesBox.textContent = '// Vänta…';
       statusEl.textContent = 'Läser PDF…';
-      outTable.hidden = true; exportCsvBtn.disabled = true;
+      exportRawBtn.disabled = true;
+      exportLinesBtn.disabled = true;
+      rebuildBtn.disabled = true;
       try{
-        const rows = await parsePdfFromArrayBuffer(await f.arrayBuffer());
-        renderRows(rows);
+        const buf = await f.arrayBuffer();
+        RAW = await readPdf(buf);
+        renderRaw(RAW);
+        // bygga initiala rader
+        const yq = Math.max(1, parseInt(yqInput.value||'2',10));
+        LINES = buildAllLines(RAW, yq);
+        renderLines(LINES);
+        statusEl.textContent = `Klar — sidor: ${RAW.length}`;
+        exportRawBtn.disabled = false;
+        exportLinesBtn.disabled = false;
+        rebuildBtn.disabled = false;
       }catch(err){
         console.error(err);
-        statusEl.textContent = 'Fel vid parsning: ' + err.message;
+        statusEl.textContent = 'Fel: ' + err.message;
+        rawBox.textContent = '// Fel: ' + err.message;
+        linesBox.textContent = '// Fel: ' + err.message;
       }
     });
 
-    // Tysta TT-varningen (frivilligt)
+    rebuildBtn.addEventListener('click', () => {
+      if(!RAW) return;
+      const yq = Math.max(1, parseInt(yqInput.value||'2',10));
+      LINES = buildAllLines(RAW, yq);
+      renderLines(LINES);
+    });
+
+    exportRawBtn.addEventListener('click', () => {
+      if(!RAW) return;
+      downloadJSON('PDF_RAW_items.json', RAW);
+    });
+
+    exportLinesBtn.addEventListener('click', () => {
+      if(!LINES) return;
+      downloadJSON('PDF_GROUPED_lines.json', LINES);
+    });
+
+    // Dämpa pdf.js TT-varning
     try {
       if (pdfjsLib.VerbosityLevel) pdfjsLib.GlobalWorkerOptions.verbosity = pdfjsLib.VerbosityLevel.ERROR;
       const o = console.warn;
