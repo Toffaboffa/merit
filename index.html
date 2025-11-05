@@ -65,7 +65,6 @@
     const MARKER_ANY = 'Slutlig antagningsstatistik';
     const norm = s => (s||'').replace(/\s+/g,' ').trim();
 
-    // pdf.js → rader
     function itemsToLines(items){
       const rows = new Map(), yq = 2;
       for(const it of items){
@@ -84,7 +83,6 @@
       return lines;
     }
 
-    // Skolnamn
     function detectSchool(line){
       if(line.includes(MARKER_ANY)){
         const before = line.split(MARKER_ANY)[0].replace(/[^A-Za-zÅÄÖåäöÉéÜüÏïÖö .\-]/g,'').trim();
@@ -99,13 +97,24 @@
     // Programnamn = svansen av raden
     const progRe = /(Programinriktat val mot .*?|Yrkesintro\.\s*mot .*?|[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+?progr\.(?:\s*-\s*[A-Za-zÅÄÖåäöÉéÜüÏïÖö\- ]+)?)$/i;
 
-    // Hämta Lägsta från talen TILL HÖGER om programmet
-    function extractLagstaFromRight(rightText){
-      const nums = Array.from(rightText.matchAll(/\b\d{1,3}(?:[.,]\d+)?\b/g)).map(m => parseFloat(m[0].replace(',','.')));
-      if(nums.length >= 4) return nums[3];          // [platser, förstahand, antagna, LÄGSTA, median?, reserver?]
-      if(nums.length === 3) return nums[2];         // ibland saknas en av de två första
-      if(nums.length === 2) return nums[1];         // ibland bara [något, LÄGSTA]
-      if(nums.length === 1) return nums[0];         // endast LÄGSTA ifyllt
+    const numRe = /\b\d{1,3}(?:[.,]\d+)?\b/g;
+    const getNums = (s) => Array.from((s||'').matchAll(numRe)).map(m => parseFloat(m[0].replace(',','.')));
+
+    // Lägsta från höger om programmet (om tabellen är i den ordningen)
+    function lagstaFromRight(rightText){
+      const nums = getNums(rightText);
+      if (nums.length >= 4) return nums[3]; // [platser, förstahand, antagna, LÄGSTA, ...]
+      if (nums.length === 3) return nums[2];
+      if (nums.length === 2) return nums[1];
+      if (nums.length === 1) return nums[0];
+      return null;
+    }
+
+    // Lägsta från vänster om programmet (ordningen i din PDF: Antagna, Lägsta, Median, Reserver, (kod), Platser)
+    function lagstaFromLeft(leftText){
+      const nums = getNums(leftText);
+      if (nums.length >= 2) return nums[1];  // 0=Antagna, 1=Lägsta
+      if (nums.length === 1) return nums[0]; // fallback om bara Lägsta finns
       return null;
     }
 
@@ -126,13 +135,18 @@
           if (sch) { currentSchool = sch; continue; }
 
           const m = line.match(progRe);
-          if(m && currentSchool){
-            const program = m[0].replace(/\bprogrammet\b/i,'progr.').replace(/\s{2,}/g,' ').trim();
-            const right = line.slice(m.index + m[0].length).trim();
-            const lagsta = extractLagstaFromRight(right);
-            if (lagsta !== null){
-              out.push([currentSchool, program, lagsta]);
-            }
+          if(!m || !currentSchool) continue;
+
+          const program = m[0].replace(/\bprogrammet\b/i,'progr.').replace(/\s{2,}/g,' ').trim();
+          const left  = line.slice(0, m.index).trim();
+          const right = line.slice(m.index + m[0].length).trim();
+
+          // 1) Försök höger → 2) fallback vänster
+          let lagsta = lagstaFromRight(right);
+          if (lagsta === null) lagsta = lagstaFromLeft(left);
+
+          if (lagsta !== null){
+            out.push([currentSchool, program, lagsta]);
           }
         }
       }
@@ -185,7 +199,7 @@
       }
     });
 
-    // Tysta just TT-varningen (frivilligt)
+    // Tysta TT-varningen (frivilligt)
     try {
       if (pdfjsLib.VerbosityLevel) pdfjsLib.GlobalWorkerOptions.verbosity = pdfjsLib.VerbosityLevel.ERROR;
       const o = console.warn;
