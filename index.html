@@ -106,16 +106,16 @@ function download(filename, text) {
   URL.revokeObjectURL(url);
 }
 
-/* ---------- Parser (fixar multi-block per skola) ---------- */
+/* ---------- Parser (multi-block per skola) ---------- */
 const reSchool = /^Slutlig antagningsstatistik för\s+(.+)$/i;
 
 // Datarad: <Program> <KOD> <platser> <förstahand> <antagna> <LÄGSTA> [<Median>] [<Reserver>]
 const reData = /^(?<prog>.+?)\s+[A-ZÅÄÖ]{2,4}\s+\d+\s+\d+\s+\d+\s+(?<lagsta>\d+(?:[.,]\d+)?)(?:\s+\d+(?:[.,]\d+)?)?(?:\s+\d+)?\s*$/i;
 
-// ”18 stv.” -> används för audit
+// ”18 stv.” -> auditförväntan
 const reStv = /(\d+)\s+stv\./i;
 
-// En del rader är bara sidnummer eller tidsstämplar
+// Sidnummer/tider
 const reJustPageNum = /^\d+$/;
 const reTimestamp = /^\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$/;
 
@@ -132,13 +132,9 @@ function parse(text){
   const lines = text.split(/\r?\n/).map(cleanLine).filter(Boolean);
 
   let currentSchool = null;
-  const per = new Map(); // school => {got:number, expected:number|null}
+  const expected = new Map(); // school => expected stv
   const rows = [];
   const missed = [];
-
-  function ensureSchool(name){
-    if (!per.has(name)) per.set(name, {got:0, expected:null});
-  }
 
   for (let raw of lines){
     if (!raw) continue;
@@ -150,16 +146,14 @@ function parse(text){
     const mSch = raw.match(reSchool);
     if (mSch){
       currentSchool = mSch[1].trim();
-      ensureSchool(currentSchool);
       continue;
     }
     if (!currentSchool) continue; // hoppa tills vi har en skola
 
-    // ”X stv.” -> sätt expected för just den skolan
+    // ”X stv.” -> spara expected för just den skolan (senaste värdet vinner)
     const mStv = raw.match(reStv);
     if (mStv){
-      ensureSchool(currentSchool);
-      per.get(currentSchool).expected = parseInt(mStv[1], 10);
+      expected.set(currentSchool, parseInt(mStv[1], 10));
       continue;
     }
 
@@ -176,23 +170,15 @@ function parse(text){
 
       const lagsta = m.groups.lagsta;
       rows.push([currentSchool, prog, lagsta]);
-
-      // ackumulera per skola (över flera block)
-      per.get(currentSchool).got += 1;
     } else {
-      // lätt felsökningsstöd (visa potentiella ”nästan”-rader)
+      // felsökning – visa potentiella ”nästan”-rader
       if (/[A-Za-zÅÄÖåäö]/.test(raw) && !raw.startsWith('Slutlig antagningsstatistik') && !/period\s+\d+/i.test(raw)){
         missed.push(raw);
       }
     }
   }
 
-  // bygg audits av map:en
-  const audits = Array.from(per.entries()).map(([school, {got, expected}]) =>
-    ({school, got, expected})
-  );
-
-  return {rows, audits, missed};
+  return {rows, expected, missed};
 }
 
 /* ---------- Hjälpfunktioner för UI ---------- */
@@ -208,29 +194,41 @@ function deduplicateRows(rows){
   return out;
 }
 
+function groupCountBySchool(rows){
+  const map = new Map();
+  for (const [school] of rows){
+    map.set(school, (map.get(school)||0)+1);
+  }
+  return map; // school => got
+}
+
 function showMissed(lines){
   missedPre.classList.remove('muted');
   if (!lines.length){
     missedPre.textContent = '—';
     return;
   }
-  // visa max 150 rader för att hålla UI lättläst
   const cap = 150;
   const head = lines.slice(0, cap);
   missedPre.textContent = head.join('\n') + (lines.length>cap ? `\n… (${lines.length-cap} fler)` : '');
 }
 
-function showReportObj({rows, audits}){
+function showReport({rows, expected}){
   const total = rows.length;
   const sample = rows.slice(0, 12).map(r => `• ${r[0]} · ${r[1]} · ${r[2]}`).join('\n') || '(inget hittat)';
 
-  const auditLines = audits.length
-    ? audits.map(a => {
-        const tag = (a.expected == null) ? ' (saknar ”stv.”)' : (a.expected === a.got ? '✔️' : '❗');
-        const expTxt = a.expected == null ? '–' : a.expected;
-        return `— ${a.school}: väntat ${expTxt}, hittade ${a.got}${(a.expected == null) ? ' (saknar ”stv.”)' : ` ${tag}`}`;
-      }).join('\n')
-    : '(inga skolor hittades för audit)';
+  // räkna ”got” från slutliga raderna
+  const gotMap = groupCountBySchool(rows);
+
+  // Bygg auditlista där vi har antingen expected, got, eller båda
+  const allSchools = new Set([...expected.keys(), ...gotMap.keys()]);
+  const auditLines = [...allSchools].sort((a,b)=>a.localeCompare(b)).map(school=>{
+    const exp = expected.has(school) ? expected.get(school) : null;
+    const got = gotMap.get(school) || 0;
+    const tag = (exp==null) ? ' (saknar ”stv.”)' : (exp===got ? ' ✔️' : ' ❗');
+    const expTxt = (exp==null) ? '–' : exp;
+    return `— ${school}: väntat ${expTxt}, hittade ${got}${tag}`;
+  }).join('\n');
 
   report.classList.remove('muted');
   report.textContent =
@@ -246,7 +244,7 @@ btn.addEventListener('click', ()=>{
     alert('Klistra in text från PDF:en först.');
     return;
   }
-  let {rows, audits, missed} = parse(text);
+  let {rows, expected, missed} = parse(text);
 
   if (dedupe.checked){
     rows = deduplicateRows(rows);
@@ -255,7 +253,7 @@ btn.addEventListener('click', ()=>{
   // sortera (Skola → Program)
   rows.sort((a,b)=> (a[0]===b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
 
-  showReportObj({rows, audits});
+  showReport({rows, expected});
   showMissed(missed);
 
   const csv = toCSV(rows, keepComma.checked);
