@@ -18,18 +18,14 @@
     button.secondary{background:#172338;color:var(--fg)}
     .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px}
     .cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-    .cols-3{display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px}
     pre{white-space:pre-wrap;word-break:break-word;margin:0;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,Monaco,monospace}
     .stat{color:var(--accent)}
-    .warn{color:var(--warn)}
-    .bad{color:var(--danger)}
     .muted{color:var(--muted)}
-    .small{font-size:.9rem}
     .badge{display:inline-block;border:1px solid var(--border);border-radius:999px;padding:2px 8px;margin-left:6px;font-size:.8rem;color:var(--muted)}
-    a{color:#8dd2ff}
     .footer{margin-top:10px;color:var(--muted);font-size:.9rem}
+    a{color:#8dd2ff}
     input[type="checkbox"]{transform:scale(1.15);margin-right:.4rem}
-    @media (max-width:900px){.cols,.cols-3{grid-template-columns:1fr}}
+    @media (max-width:900px){.cols{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
@@ -38,7 +34,7 @@
 
   <div class="row">
     <div class="panel">
-      <div class="small muted" style="margin-bottom:8px">
+      <div class="muted" style="margin-bottom:8px">
         Tips: Öppna PDF → markera all text (Ctrl+A) → kopiera → klistra in här.
       </div>
       <textarea id="ta" placeholder="Klistra in text här från PDF-utdraget ..."></textarea>
@@ -46,8 +42,8 @@
         <button id="btn">Extrahera</button>
         <button id="btnCopy" class="secondary" disabled>Kopiera CSV</button>
         <button id="btnDl" class="secondary" disabled>Ladda ned CSV</button>
-        <label class="small"><input type="checkbox" id="keepComma" />Behåll kommatecken som decimal (standard = punkt)</label>
-        <label class="small"><input type="checkbox" id="dedupe" checked />Ta bort dubbletter</label>
+        <label><input type="checkbox" id="keepComma" />Behåll kommatecken som decimal (standard = punkt)</label>
+        <label><input type="checkbox" id="dedupe" checked />Ta bort dubbletter</label>
       </div>
       <div class="footer">All parsing sker i din webbläsare. Inget skickas någonstans.</div>
     </div>
@@ -94,10 +90,8 @@ function toCSV(rows, useComma){
   const header = 'Skola;Program;Lägsta_Merit';
   const lines = rows.map(r => {
     let [a,b,c] = r;
-    // Escapa semikolon i programnamn
-    b = b.replace(/;/g, ',');
-    // decimalformat
-    if (!useComma) c = String(c).replace(',', '.');
+    b = b.replace(/;/g, ',');      // skydda semikolon i programnamn
+    if (!useComma) c = String(c).replace(',', '.'); // decimalseparator
     return `${a};${b};${c}`;
   });
   return [header, ...lines].join('\n');
@@ -112,19 +106,18 @@ function download(filename, text) {
   URL.revokeObjectURL(url);
 }
 
-/* ---------- Parser ---------- */
-// Skolrubrik
+/* ---------- Parser (fixar multi-block per skola) ---------- */
 const reSchool = /^Slutlig antagningsstatistik för\s+(.+)$/i;
 
-// Mer tolerant datarad:
-// <Program> <KOD:2–4 bokstäver (även ÅÄÖ)> <platser> <förstahand> <antagna> <LÄGSTA> [<Median>] [<Reserver>]
+// Datarad: <Program> <KOD> <platser> <förstahand> <antagna> <LÄGSTA> [<Median>] [<Reserver>]
 const reData = /^(?<prog>.+?)\s+[A-ZÅÄÖ]{2,4}\s+\d+\s+\d+\s+\d+\s+(?<lagsta>\d+(?:[.,]\d+)?)(?:\s+\d+(?:[.,]\d+)?)?(?:\s+\d+)?\s*$/i;
 
-// ”18 stv.” -> för audit
+// ”18 stv.” -> används för audit
 const reStv = /(\d+)\s+stv\./i;
 
-// En del sidor visar bara sidnummer: ”1”, ”2” etc
+// En del rader är bara sidnummer eller tidsstämplar
 const reJustPageNum = /^\d+$/;
+const reTimestamp = /^\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$/;
 
 const skipExact = new Set([
   'Gymnasieantagningen i Örebro län',
@@ -138,40 +131,35 @@ const skipExact = new Set([
 function parse(text){
   const lines = text.split(/\r?\n/).map(cleanLine).filter(Boolean);
 
-  let school = null;
-  let expected = null;
-  let currentCount = 0;
-
+  let currentSchool = null;
+  const per = new Map(); // school => {got:number, expected:number|null}
   const rows = [];
-  const audits = [];
   const missed = [];
 
-  const commitAudit = () => {
-    if (school && expected != null){
-      audits.push({school, expected, got: currentCount});
-    }
-  };
+  function ensureSchool(name){
+    if (!per.has(name)) per.set(name, {got:0, expected:null});
+  }
 
   for (let raw of lines){
     if (!raw) continue;
     if (skipExact.has(raw)) continue;
     if (reJustPageNum.test(raw)) continue;
+    if (reTimestamp.test(raw)) continue;
 
-    // Ny skola?
+    // Ny (eller upprepad) skolrubrik
     const mSch = raw.match(reSchool);
     if (mSch){
-      commitAudit();
-      school = mSch[1].trim();
-      expected = null;
-      currentCount = 0;
+      currentSchool = mSch[1].trim();
+      ensureSchool(currentSchool);
       continue;
     }
-    if (!school) continue;
+    if (!currentSchool) continue; // hoppa tills vi har en skola
 
-    // ”X stv.”
+    // ”X stv.” -> sätt expected för just den skolan
     const mStv = raw.match(reStv);
     if (mStv){
-      expected = parseInt(mStv[1], 10);
+      ensureSchool(currentSchool);
+      per.get(currentSchool).expected = parseInt(mStv[1], 10);
       continue;
     }
 
@@ -183,24 +171,31 @@ function parse(text){
         .replace(/\s-\s/g, ' - ')
         .trim();
 
-      // rensa kvarvarande rubrikspill ”Studieväg …” om PDF chunkat konstigt
+      // rensa rubrikspill
       if (/^Studieväg\s/i.test(prog)) continue;
 
-      let lagsta = m.groups.lagsta;
-      rows.push([school, prog, lagsta]);
-      currentCount++;
+      const lagsta = m.groups.lagsta;
+      rows.push([currentSchool, prog, lagsta]);
+
+      // ackumulera per skola (över flera block)
+      per.get(currentSchool).got += 1;
     } else {
-      // För felsökning – visa bara rader som ser ut att vara programnamn
-      if (/[A-Za-zÅÄÖåäö]/.test(raw) && !raw.startsWith('Slutlig antagningsstatistik') && !raw.match(/period\s+\d+/i)){
+      // lätt felsökningsstöd (visa potentiella ”nästan”-rader)
+      if (/[A-Za-zÅÄÖåäö]/.test(raw) && !raw.startsWith('Slutlig antagningsstatistik') && !/period\s+\d+/i.test(raw)){
         missed.push(raw);
       }
     }
   }
-  commitAudit();
+
+  // bygg audits av map:en
+  const audits = Array.from(per.entries()).map(([school, {got, expected}]) =>
+    ({school, got, expected})
+  );
 
   return {rows, audits, missed};
 }
 
+/* ---------- Hjälpfunktioner för UI ---------- */
 function deduplicateRows(rows){
   const seen = new Set();
   const out = [];
@@ -213,31 +208,35 @@ function deduplicateRows(rows){
   return out;
 }
 
+function showMissed(lines){
+  missedPre.classList.remove('muted');
+  if (!lines.length){
+    missedPre.textContent = '—';
+    return;
+  }
+  // visa max 150 rader för att hålla UI lättläst
+  const cap = 150;
+  const head = lines.slice(0, cap);
+  missedPre.textContent = head.join('\n') + (lines.length>cap ? `\n… (${lines.length-cap} fler)` : '');
+}
+
 function showReportObj({rows, audits}){
   const total = rows.length;
   const sample = rows.slice(0, 12).map(r => `• ${r[0]} · ${r[1]} · ${r[2]}`).join('\n') || '(inget hittat)';
 
   const auditLines = audits.length
     ? audits.map(a => {
-        const ok = a.expected === a.got;
-        return `— ${a.school}: väntat ${a.expected}, hittade ${a.got} ${ok ? '✔️' : '❗'}`;
+        const tag = (a.expected == null) ? ' (saknar ”stv.”)' : (a.expected === a.got ? '✔️' : '❗');
+        const expTxt = a.expected == null ? '–' : a.expected;
+        return `— ${a.school}: väntat ${expTxt}, hittade ${a.got}${(a.expected == null) ? ' (saknar ”stv.”)' : ` ${tag}`}`;
       }).join('\n')
-    : '(inga ”X stv.”-rader hittades)';
+    : '(inga skolor hittades för audit)';
 
   report.classList.remove('muted');
-  report.innerHTML = `Rader hittade totalt: <b class="stat">${total}</b>\n` +
-                     `${sample}${total>12 ? `\n… (${total-12} fler)` : ''}\n\n` +
-                     `Kontroll (”X stv.”):\n${auditLines}`;
-}
-
-function showMissed(missed){
-  if (!missed.length){
-    missedPre.textContent = '—';
-    missedPre.classList.add('muted');
-    return;
-  }
-  missedPre.classList.remove('muted');
-  missedPre.textContent = missed.slice(0,80).join('\n') + (missed.length>80?`\n… (${missed.length-80} fler)`: '');
+  report.textContent =
+    `Rader hittade totalt: ${total}\n` +
+    `${sample}${total>12 ? `\n… (${total-12} fler)` : ''}\n\n` +
+    `Kontroll (”X stv.”):\n${auditLines}`;
 }
 
 /* ---------- Wire up ---------- */
@@ -253,7 +252,7 @@ btn.addEventListener('click', ()=>{
     rows = deduplicateRows(rows);
   }
 
-  // sortera valfritt (Skola → Program)
+  // sortera (Skola → Program)
   rows.sort((a,b)=> (a[0]===b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
 
   showReportObj({rows, audits});
@@ -274,8 +273,8 @@ btn.addEventListener('click', ()=>{
 btnCopy.addEventListener('click', async ()=>{
   try{
     await navigator.clipboard.writeText(btnCopy.dataset.csv || '');
-    btnCopy.textContent = 'Kopierad!';
-    setTimeout(()=>btnCopy.textContent='Kopiera CSV', 1200);
+    const old = btnCopy.textContent; btnCopy.textContent = 'Kopierad!';
+    setTimeout(()=>btnCopy.textContent=old, 1200);
   }catch(e){
     alert('Kunde inte kopiera. Markera texten manuellt och kopiera.');
   }
