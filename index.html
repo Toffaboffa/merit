@@ -130,7 +130,7 @@ function toCSV(rows, useComma){
   return [header, ...lines].join('\n');
 }
 function download(filename, text) {
-  const blob = new Blob([text], {type: 'text/csv;charset=utf-8;'});
+  const blob = new Blob(["\uFEFF" + text], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -261,8 +261,10 @@ btn.addEventListener('click', ()=>{
   btnDl.disabled = false;
   btnSupabase.disabled = false;
 
+  // gör CSV:en tillgänglig för alla knappar
   btnCopy.dataset.csv = csv;
   btnDl.dataset.csv = csv;
+  btnSupabase.dataset.csv = csv;
 });
 
 /* ---------- Copy / download ---------- */
@@ -288,19 +290,27 @@ async function uploadToSupabase(csvText){
   const versionPath = `orebro/antagning_${stamp}.csv`;
   const latestPath  = `orebro/latest.csv`;
 
-  // 1) Versionsfil (ingen upsert)
+  // 1) Versionsfil (ingen upsert) — med BOM
   let { error: vErr } = await supabase
     .storage.from('antagning')
-    .upload(versionPath, new Blob([csvText], {type:'text/csv;charset=utf-8;'}), { upsert: false });
+    .upload(
+      versionPath,
+      new Blob(["\uFEFF" + csvText], { type:'text/csv;charset=utf-8;' }),
+      { upsert: false }
+    );
 
   if (vErr && vErr.message && !/The resource already exists/i.test(vErr.message)){
     throw new Error('Versionsuppladdning misslyckades: ' + vErr.message);
   }
 
-  // 2) latest.csv (upsert = true)
+  // 2) latest.csv (upsert = true) — också med BOM ✅
   let { error: lErr } = await supabase
     .storage.from('antagning')
-    .upload(latestPath, new Blob([csvText], {type:'text/csv;charset=utf-8;'}), { upsert: true });
+    .upload(
+      latestPath,
+      new Blob(["\uFEFF" + csvText], { type:'text/csv;charset=utf-8;' }),
+      { upsert: true }
+    );
 
   if (lErr){
     throw new Error('latest.csv-uppladdning misslyckades: ' + lErr.message);
