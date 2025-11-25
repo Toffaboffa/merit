@@ -8,26 +8,31 @@ if (!url || !key) {
   process.exit(1);
 }
 
+// Viktigt: ange att vi ska använda PostgREST
 const supabase = createClient(url, key, {
-  auth: { persistSession: false }
+  auth: { persistSession: false },
+  global: {
+    headers: {
+      "apikey": key
+    }
+  }
 });
 
 (async () => {
   try {
-    // Minimal SELECT – räcker att göra en fråga
     const { data, error } = await supabase
-      .from('antagning_keepalive')
-      .select('id')
+      .from("antagning_keepalive")
+      .select("id")
       .limit(1);
 
     if (error) {
-      console.error('Supabase keep-alive error:', error.message);
+      console.error("Supabase keep-alive error:", error.message);
       process.exit(1);
     }
 
-    console.log('Supabase keep-alive OK. Rows:', data?.length ?? 0);
+    console.log("Supabase keep-alive OK. Rows:", data?.length ?? 0);
   } catch (e) {
-    console.error('Unexpected error in keep-alive:', e);
+    console.error("Unexpected error in keep-alive:", e);
     process.exit(1);
   }
 })();
