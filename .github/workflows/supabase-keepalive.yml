@@ -2,9 +2,8 @@ name: Supabase Keep-Alive
 
 on:
   schedule:
-    # Kör 1 gång per dag kl 03:00 UTC
+    # Kör en gång per dag kl 03:00 UTC
     - cron: "0 3 * * *"
-  # Gör att du kan testa manuellt i GitHub Actions
   workflow_dispatch: {}
 
 jobs:
@@ -20,10 +19,10 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install Supabase client
-        run: npm install @supabase/supabase-js
+      - name: Install dependencies
+        run: npm install node-fetch@3
 
-      - name: Ping Supabase
+      - name: Ping Supabase via RPC
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
