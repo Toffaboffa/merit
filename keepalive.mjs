@@ -1,6 +1,6 @@
 import fetch from "node-fetch";
 
-const url = process.env.SUPABASE_URL;        // https://xxxx.supabase.co
+const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!url || !key) {
